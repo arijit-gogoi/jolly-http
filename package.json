@@ -1,0 +1,58 @@
+{
+  "name": "jolly-http",
+  "version": "0.0.1",
+  "description": "Workflow-as-code HTTP tool: simplicity of httpie, speed of xh, sequential + parallel + watched modes from one .mjs file",
+  "author": "Arijit Gogoi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arijit-gogoi/jolly-http.git"
+  },
+  "homepage": "https://github.com/arijit-gogoi/jolly-http",
+  "bugs": "https://github.com/arijit-gogoi/jolly-http/issues",
+  "keywords": [
+    "http",
+    "fetch",
+    "cli",
+    "httpie",
+    "xh",
+    "workflow",
+    "load-testing",
+    "structured-concurrency",
+    "jolly-coop"
+  ],
+  "type": "module",
+  "bin": {
+    "jolly-http": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/cli.ts src/index.ts --format esm --dts",
+    "pretest": "tsup src/cli.ts src/index.ts --format esm",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jolly-coop": "^0.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.4"
+  }
+}
