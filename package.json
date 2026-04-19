@@ -40,8 +40,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/cli.ts src/index.ts --format esm --dts",
-    "pretest": "tsup src/cli.ts src/index.ts --format esm",
+    "build": "tsup src/cli.ts src/index.ts --format esm --dts --clean",
+    "pretest": "tsup src/cli.ts src/index.ts --format esm --clean",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
