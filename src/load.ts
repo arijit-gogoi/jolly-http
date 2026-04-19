@@ -1,0 +1,370 @@
+import { scope, sleep, yieldNow, isStructuralCancellation } from "jolly-coop"
+import { buildEnv, withRuntime, type RuntimeContext } from "./runtime.js"
+import { createSampleSink } from "./output.js"
+import { loadWorkflow } from "./run.js"
+import type { LoadOptions, Sample, SampleSink, VuContext, WorkflowFn } from "./types.js"
+
+/**
+ * Summary stats computed across all per-request samples observed during the
+ * load run. Shape is stable (consumed by cli.ts printLoadSummary).
+ */
+export interface StatsSnapshot {
+  total: number
+  success: number
+  errors: number
+  elapsedMs: number
+  latency: { avg: number; p50: number; p95: number; p99: number; max: number; min: number }
+  byStatus: Record<number, number>
+  byError: Record<string, number>
+  throughput: number
+}
+
+export type EndedBy = "drained" | "abort" | "error"
+
+export interface LoadResult {
+  endedBy: EndedBy
+  snapshot: StatsSnapshot
+  concurrency: number
+  durationMs: number
+  targetRps?: number
+  achievedRps: number
+  samples: number
+  failure?: unknown
+}
+
+/**
+ * Run a workflow under load. Single scope-tree owns deadline, sample sink,
+ * progress printer, and the VU pool. Per-iteration errors are caught inside
+ * the VU loop (error-as-value at the scenario boundary) so individual failures
+ * don't cancel siblings — that's the load-tester contract.
+ *
+ * Per-request samples (one per `request.GET/POST/...`) are written via the
+ * runtime's sink. VU-scenario outcomes (one per iteration) feed `Stats` for
+ * the summary but are NOT written to the NDJSON sink — NDJSON stays
+ * per-request per PLAN §4.
+ */
+export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
+  const fn = await loadWorkflow(opts.workflowPath)
+  const env = buildEnv(opts.env)
+
+  const stats = new Stats(opts.warmupMs ?? 0)
+  const tZero = performance.now()
+  const deadline = Date.now() + opts.durationMs
+  const completed = { n: 0 }
+  const rateLimiter = opts.rps !== undefined ? new RateLimiter(opts.rps) : undefined
+  const userAgent = opts.userAgent ?? `jolly-http/0.1.0`
+
+  let endedBy: EndedBy = "drained"
+  let failure: unknown
+  let samples = 0
+
+  const outerSink = createSampleSink(opts.outPath)
+  const sink: SampleSink = {
+    write(s) {
+      samples++
+      outerSink.write(s)
+    },
+    close: () => outerSink.close(),
+  }
+
+  try {
+    await scope({ deadline, signal: opts.signal }, async root => {
+      await root.resource(sink, s => s.close())
+
+      if (!opts.quiet) {
+        root.spawn(() => runProgress(stats, root.signal, opts.durationMs))
+      }
+
+      await scope({ limit: opts.concurrency, signal: root.signal }, async pool => {
+        for (let i = 0; i < opts.concurrency; i++) {
+          pool.spawn(() =>
+            runVu({
+              vuId: i,
+              fn,
+              env,
+              sink,
+              signal: pool.signal,
+              tZero,
+              rateLimiter,
+              completed,
+              defaults: {
+                userAgent,
+                perRequestTimeoutMs: opts.perRequestTimeoutMs,
+                insecure: opts.insecure,
+              },
+              onOutcome: s => stats.push(s),
+            }),
+          )
+        }
+      })
+      root.done()
+    })
+  } catch (err) {
+    if (isStructuralCancellation(err)) endedBy = "drained"
+    else if (opts.signal?.aborted) endedBy = "abort"
+    else {
+      endedBy = "error"
+      failure = err
+    }
+  }
+
+  if (opts.signal?.aborted && endedBy !== "error") endedBy = "abort"
+
+  const snapshot = stats.snapshot()
+  const achievedRps = snapshot.elapsedMs > 0 ? (snapshot.total / snapshot.elapsedMs) * 1_000 : 0
+
+  return {
+    endedBy,
+    snapshot,
+    concurrency: opts.concurrency,
+    durationMs: opts.durationMs,
+    targetRps: opts.rps,
+    achievedRps,
+    samples,
+    failure,
+  }
+}
+
+// ---------------- VU loop ----------------
+
+interface VuCtx {
+  vuId: number
+  fn: WorkflowFn
+  env: Readonly<Record<string, string>>
+  sink: SampleSink
+  signal: AbortSignal
+  tZero: number
+  rateLimiter?: RateLimiter
+  completed: { n: number }
+  defaults: { userAgent: string; perRequestTimeoutMs?: number; insecure?: boolean }
+  onOutcome: (sample: Sample) => void
+}
+
+async function runVu(ctx: VuCtx): Promise<void> {
+  let iteration = 0
+  try {
+    while (!ctx.signal.aborted) {
+      const outcome = await oneIteration(ctx, iteration++)
+      if (outcome) {
+        ctx.onOutcome(outcome)
+        ctx.completed.n++
+      }
+      if (ctx.rateLimiter && !ctx.signal.aborted) {
+        const delay = ctx.rateLimiter.nextDelayMs(
+          ctx.completed.n,
+          performance.now() - ctx.tZero,
+        )
+        if (delay > 0) await sleep(delay, ctx.signal)
+        else await yieldNow(ctx.signal)
+      } else {
+        await yieldNow(ctx.signal)
+      }
+    }
+  } catch (err) {
+    if (isStructuralCancellation(err)) return
+    if (ctx.signal.aborted) return
+    throw err
+  }
+}
+
+async function oneIteration(ctx: VuCtx, iteration: number): Promise<Sample | undefined> {
+  const t = (performance.now() - ctx.tZero) / 1_000
+  const started = performance.now()
+  const ts = new Date().toISOString()
+  const vu: VuContext = { id: ctx.vuId, iteration, env: ctx.env }
+  const runtimeCtx: RuntimeContext = {
+    vu,
+    sink: ctx.sink,
+    signal: ctx.signal,
+    tZero: ctx.tZero,
+    defaults: ctx.defaults,
+  }
+
+  try {
+    await withRuntime(runtimeCtx, async () => ctx.fn(vu, ctx.signal))
+    return {
+      ok: true,
+      t,
+      vu: ctx.vuId,
+      iteration,
+      method: "",
+      url: "",
+      duration_ms: performance.now() - started,
+      status: 0,
+      size: 0,
+      ts,
+    }
+  } catch (err) {
+    if (ctx.signal.aborted) return undefined
+    const e = err as { name?: string; message?: string }
+    return {
+      ok: false,
+      t,
+      vu: ctx.vuId,
+      iteration,
+      method: "",
+      url: "",
+      duration_ms: performance.now() - started,
+      error: e?.name ?? "Error",
+      message: e?.message ?? String(err),
+      ts,
+    }
+  }
+}
+
+// ---------------- Stats + percentiles ----------------
+
+/**
+ * Sorted-buffer percentile calculator. Insert is O(log n) binary search + O(n)
+ * shift; acceptable up to ~100k samples. Upgrade to t-digest later if needed.
+ */
+export class PercentileBuffer {
+  private buf: Float64Array
+  private len = 0
+
+  constructor(initialCapacity = 1024) {
+    this.buf = new Float64Array(initialCapacity)
+  }
+
+  get count(): number { return this.len }
+  get min(): number { return this.len === 0 ? Number.NaN : this.buf[0] }
+  get max(): number { return this.len === 0 ? Number.NaN : this.buf[this.len - 1] }
+
+  get mean(): number {
+    if (this.len === 0) return Number.NaN
+    let sum = 0
+    for (let i = 0; i < this.len; i++) sum += this.buf[i]
+    return sum / this.len
+  }
+
+  push(value: number): void {
+    if (this.len === this.buf.length) this.grow()
+    const idx = this.searchInsertIndex(value)
+    this.buf.copyWithin(idx + 1, idx, this.len)
+    this.buf[idx] = value
+    this.len++
+  }
+
+  /** p in [0, 1] — e.g. 0.95 for p95. Nearest-rank. */
+  p(q: number): number {
+    if (this.len === 0) return Number.NaN
+    if (q <= 0) return this.buf[0]
+    if (q >= 1) return this.buf[this.len - 1]
+    const rank = Math.ceil(q * this.len) - 1
+    return this.buf[Math.max(0, Math.min(this.len - 1, rank))]
+  }
+
+  private grow(): void {
+    const next = new Float64Array(this.buf.length * 2)
+    next.set(this.buf)
+    this.buf = next
+  }
+
+  private searchInsertIndex(value: number): number {
+    let lo = 0
+    let hi = this.len
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (this.buf[mid] <= value) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
+}
+
+export class Stats {
+  private readonly latency = new PercentileBuffer(4096)
+  private readonly byStatus = new Map<number, number>()
+  private readonly byError = new Map<string, number>()
+  private _total = 0
+  private _success = 0
+  private _errors = 0
+  private readonly startMs = performance.now()
+  private warmupEndMs: number
+
+  constructor(public readonly warmupMs = 0) {
+    this.warmupEndMs = this.startMs + warmupMs
+  }
+
+  push(sample: Sample): void {
+    if (performance.now() < this.warmupEndMs) return
+    this._total++
+    this.latency.push(sample.duration_ms)
+    if (sample.ok) {
+      this._success++
+      this.byStatus.set(sample.status, (this.byStatus.get(sample.status) ?? 0) + 1)
+    } else {
+      this._errors++
+      this.byError.set(sample.error, (this.byError.get(sample.error) ?? 0) + 1)
+    }
+  }
+
+  get total(): number { return this._total }
+  get errors(): number { return this._errors }
+  get elapsedMs(): number { return performance.now() - this.startMs }
+
+  snapshot(): StatsSnapshot {
+    const elapsedMs = this.elapsedMs
+    const elapsedSec = elapsedMs / 1_000
+    return {
+      total: this._total,
+      success: this._success,
+      errors: this._errors,
+      elapsedMs,
+      latency: {
+        avg: this.latency.mean,
+        p50: this.latency.p(0.5),
+        p95: this.latency.p(0.95),
+        p99: this.latency.p(0.99),
+        max: this.latency.max,
+        min: this.latency.min,
+      },
+      byStatus: Object.fromEntries(this.byStatus),
+      byError: Object.fromEntries(this.byError),
+      throughput: elapsedSec > 0 ? this._total / elapsedSec : 0,
+    }
+  }
+}
+
+// ---------------- Rate limiter ----------------
+
+export class RateLimiter {
+  constructor(public readonly targetRps: number) {
+    if (!(targetRps > 0)) throw new Error("targetRps must be > 0")
+  }
+
+  /** ms to sleep before firing the next request. 0 if behind target. */
+  nextDelayMs(completedSoFar: number, elapsedMs: number): number {
+    const targetMs = (completedSoFar * 1_000) / this.targetRps
+    const delay = targetMs - elapsedMs
+    return delay > 0 ? delay : 0
+  }
+}
+
+// ---------------- Progress ----------------
+
+const PROGRESS_REFRESH_MS = 100
+
+async function runProgress(stats: Stats, signal: AbortSignal, durationMs: number): Promise<void> {
+  const out = process.stderr
+  const isTTY = out.isTTY
+  try {
+    while (!signal.aborted) {
+      writeProgressLine(stats, durationMs, isTTY)
+      await sleep(PROGRESS_REFRESH_MS, signal)
+    }
+  } catch (err) {
+    if (!isStructuralCancellation(err) && !signal.aborted) throw err
+  } finally {
+    if (isTTY) out.write("\n")
+  }
+}
+
+function writeProgressLine(stats: Stats, durationMs: number, isTTY: boolean): void {
+  const elapsedSec = stats.elapsedMs / 1_000
+  const totalSec = durationMs / 1_000
+  const rps = elapsedSec > 0 ? (stats.total / elapsedSec).toFixed(1) : "0.0"
+  const line = `  ${stats.total.toLocaleString()} reqs  ${rps}/s  ${stats.errors} errs  ${elapsedSec.toFixed(1)}/${totalSec.toFixed(1)}s`
+  if (isTTY) process.stderr.write(`\r${line.padEnd(72)}`)
+  else process.stderr.write(line + "\n")
+}

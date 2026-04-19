@@ -6,3 +6,6 @@ coverage/
 *.ndjson
 .DS_Store
 .claude/settings.local.json
+test/fixtures/run/
+test/fixtures/load/
+test/fixtures/integration/
