@@ -52,7 +52,7 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
   const deadline = Date.now() + opts.durationMs
   const completed = { n: 0 }
   const rateLimiter = opts.rps !== undefined ? new RateLimiter(opts.rps) : undefined
-  const userAgent = opts.userAgent ?? `jolly-http/0.1.0`
+  const userAgent = opts.userAgent ?? `jolly-http/0.1.1`
 
   let endedBy: EndedBy = "drained"
   let failure: unknown
