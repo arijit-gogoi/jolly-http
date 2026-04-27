@@ -22,6 +22,11 @@ export interface CliArgs {
   durationMs?: number
   rps?: number
   warmupMs?: number
+  watch: boolean
+  watchMode: "eager" | "lazy"
+  cookiesDir?: string
+  harDir?: string
+  harReplayPath?: string
 }
 
 export class CliError extends Error {
@@ -54,6 +59,11 @@ export function parseCli(argv: string[]): CliArgs {
         duration: { type: "string", short: "d" },
         rps: { type: "string" },
         warmup: { type: "string" },
+        watch: { type: "boolean" },
+        "watch-mode": { type: "string" },
+        cookies: { type: "string" },
+        har: { type: "string" },
+        "har-replay": { type: "string" },
       },
     })
   } catch (err) {
@@ -85,6 +95,19 @@ export function parseCli(argv: string[]): CliArgs {
   const rps = typeof values.rps === "string" ? parseFloat(values.rps) : undefined
   const warmupMs = typeof values.warmup === "string" ? parseDuration(values.warmup) : undefined
 
+  const watch = values.watch === true
+  const watchModeRaw = strOrUndef(values["watch-mode"])
+  if (watchModeRaw !== undefined && watchModeRaw !== "eager" && watchModeRaw !== "lazy") {
+    throw new CliError(`bad --watch-mode: ${watchModeRaw} (expected eager|lazy)`, 2)
+  }
+  const watchMode: "eager" | "lazy" = (watchModeRaw as "eager" | "lazy" | undefined) ?? "eager"
+  const cookiesDir = strOrUndef(values.cookies)
+  const harDir = strOrUndef(values.har)
+  const harReplayPath = strOrUndef(values["har-replay"])
+  if (harDir !== undefined && harReplayPath !== undefined) {
+    throw new CliError("--har and --har-replay cannot be combined (chained record-from-replay is unsupported)", 2)
+  }
+
   if (positionals.length === 0) throw new CliError("no arguments — see --help", 2)
   const first = positionals[0]
 
@@ -104,8 +127,14 @@ export function parseCli(argv: string[]): CliArgs {
       durationMs,
       rps,
       warmupMs,
+      watch,
+      watchMode,
+      cookiesDir,
+      harDir,
+      harReplayPath,
     })
   }
+  if (watch) throw new CliError("--watch only valid with `run` subcommand", 2)
 
   const upper = first.toUpperCase()
   if (METHODS.has(upper)) {
@@ -127,6 +156,9 @@ export function parseCli(argv: string[]): CliArgs {
       quiet: values.quiet === true,
       outPath: strOrUndef(values.out),
       env: envFlags,
+      cookiesDir,
+      harDir,
+      harReplayPath,
     })
   }
 
@@ -157,6 +189,11 @@ function baseArgs(partial: Partial<CliArgs> & { mode: CliArgs["mode"] }): CliArg
     durationMs: partial.durationMs,
     rps: partial.rps,
     warmupMs: partial.warmupMs,
+    watch: partial.watch ?? false,
+    watchMode: partial.watchMode ?? "eager",
+    cookiesDir: partial.cookiesDir,
+    harDir: partial.harDir,
+    harReplayPath: partial.harReplayPath,
   }
 }
 
@@ -197,17 +234,27 @@ OPTIONS
   --json <str>              Set body to this JSON string (overrides shorthand)
   --form                    Use form encoding instead of JSON
   --timeout <dur>           Per-request timeout (e.g. 5s, 500ms)
-  --insecure, -k            [v0.2] Skip TLS validation (not yet wired)
+  --insecure, -k            [v0.3] Skip TLS validation (not yet wired)
   --user-agent <str>        Override User-Agent
   --quiet, -q               Suppress per-request output
   --out <path>              Write NDJSON samples to path
   --env KEY=VAL             Set env var for workflow (repeatable)
+  --cookies <dir>           Persist cookies as <dir>/vu-N.json (per-VU files)
+  --har <dir>               Record HAR as <dir>/vu-N.har (per-VU files)
+  --har-replay <path>       Replay responses from a recorded HAR.
+                            file (*.har) → shared across VUs;
+                            directory     → per-VU (<dir>/vu-N.har).
+                            Strict match: method + url + body. Misses throw.
 
 LOAD MODE
   -c, --concurrency <n>     Virtual users (default 1)
   -d, --duration <dur>      Total duration (e.g. 30s, 2m)
   --rps <n>                 Target requests/sec
   --warmup <dur>            Exclude first N from stats
+
+WATCH MODE (run only)
+  --watch                   Rerun workflow on file change
+  --watch-mode <mode>       eager (cancel mid-flight, default) | lazy (queue)
 
   --help, -h                Show this help
   --version, -V             Show version
@@ -217,4 +264,7 @@ EXAMPLES
   jolly-http POST https://httpbin.org/post name=ari age:=30 Auth:tok
   jolly-http run examples/auth.mjs --env API=https://staging/
   jolly-http run examples/auth.mjs -c 50 -d 30s --out samples.ndjson
+  jolly-http run examples/auth.mjs --watch --cookies ./jar
+  jolly-http run examples/auth.mjs --har ./har-out
+  jolly-http run examples/auth.mjs --har-replay ./har-out
 `

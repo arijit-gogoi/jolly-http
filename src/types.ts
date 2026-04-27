@@ -50,6 +50,9 @@ export interface RunOptions {
   insecure?: boolean
   quiet?: boolean
   signal?: AbortSignal
+  cookiesDir?: string
+  harDir?: string
+  harReplayPath?: string
 }
 
 export interface LoadOptions extends RunOptions {
@@ -79,6 +82,9 @@ export interface AdhocOptions {
   quiet?: boolean
   outPath?: string
   signal?: AbortSignal
+  cookiesDir?: string
+  harDir?: string
+  harReplayPath?: string
 }
 
 export interface RequestInit {
@@ -90,4 +96,6 @@ export interface RequestInit {
   timeout?: string | number
   signal?: AbortSignal
   redirect?: "follow" | "manual" | "error"
+  /** Set to false to opt this request out of the per-VU cookie jar. Default: true. */
+  cookies?: boolean
 }

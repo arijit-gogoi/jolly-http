@@ -1,6 +1,6 @@
 {
   "name": "jolly-http",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Workflow-as-code HTTP tool: simplicity of httpie, speed of xh, sequential + parallel + watched modes from one .mjs file",
   "author": "Arijit Gogoi",
   "license": "MIT",

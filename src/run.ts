@@ -3,6 +3,8 @@ import { resolve } from "node:path"
 import { scope, isStructuralCancellation } from "jolly-coop"
 import { buildEnv, withRuntime, type RuntimeContext } from "./runtime.js"
 import { createSampleSink } from "./output.js"
+import { loadCookieJar, saveCookieJar, cookieJarPath } from "./cookies.js"
+import { createHarRecorder, saveHar, harPath, loadHarReplay } from "./har.js"
 import type { RunOptions, RunResult, WorkflowFn } from "./types.js"
 
 export async function loadWorkflow(path: string): Promise<WorkflowFn> {
@@ -50,6 +52,18 @@ export async function runWorkflowFn(fn: WorkflowFn, opts: RunOptions): Promise<R
       },
       close: () => sink.close(),
     }
+    // Single-run uses vu-0.* — same naming as load for tooling consistency.
+    const cookieJar = opts.cookiesDir
+      ? await s.resource(loadCookieJar(cookieJarPath(opts.cookiesDir, 0)), j => {
+          saveCookieJar(j, cookieJarPath(opts.cookiesDir!, 0))
+        })
+      : undefined
+    const harRecorder = opts.harDir
+      ? await s.resource(createHarRecorder("0.2.0"), r => {
+          saveHar(r, harPath(opts.harDir!, 0))
+        })
+      : undefined
+    const harReplay = opts.harReplayPath ? loadHarReplay(opts.harReplayPath, 0) : undefined
     const ctx: RuntimeContext = {
       vu: { id: 0, iteration: 0, env },
       sink: wrappedSink,
@@ -60,6 +74,9 @@ export async function runWorkflowFn(fn: WorkflowFn, opts: RunOptions): Promise<R
         perRequestTimeoutMs: opts.perRequestTimeoutMs,
         insecure: opts.insecure,
       },
+      cookieJar,
+      harRecorder,
+      harReplay,
     }
     return withRuntime(ctx, async () => fn(ctx.vu, s.signal))
   }).then(

@@ -2,6 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { sleep as coopSleep } from "jolly-coop"
 import { parseDuration } from "jolly-coop"
 import type { Sample, SampleSink, VuContext } from "./types.js"
+import type { CookieJar } from "./cookies.js"
+import type { HarRecorder, HarReplayer } from "./har.js"
 
 export class AssertionError extends Error {
   constructor(message: string) {
@@ -20,6 +22,9 @@ export interface RuntimeContext {
     perRequestTimeoutMs?: number
     insecure?: boolean
   }
+  cookieJar?: CookieJar
+  harRecorder?: HarRecorder
+  harReplay?: HarReplayer
 }
 
 const STORE = new AsyncLocalStorage<RuntimeContext>()

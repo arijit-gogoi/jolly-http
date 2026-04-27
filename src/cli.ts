@@ -4,6 +4,7 @@ import { VERSION } from "./index.js"
 import { runWorkflow } from "./run.js"
 import { runAdhoc } from "./adhoc.js"
 import { runLoad, type LoadResult } from "./load.js"
+import { runWatched } from "./watch.js"
 import { formatMs } from "./time.js"
 import { parseCli, CliError, USAGE, type CliArgs } from "./cli-args.js"
 import type { AdhocOptions, LoadOptions, RunOptions } from "./types.js"
@@ -58,6 +59,9 @@ export async function main(argv: string[]): Promise<number> {
         quiet: args.quiet,
         outPath: args.outPath,
         signal: ac.signal,
+        cookiesDir: args.cookiesDir,
+        harDir: args.harDir,
+        harReplayPath: args.harReplayPath,
       }
       const result = await runAdhoc(opts)
       return result.ok ? 0 : 1
@@ -66,8 +70,34 @@ export async function main(argv: string[]): Promise<number> {
     if (args.mode === "run") {
       const workflowPath = args.workflow!
       const isLoad = args.concurrency !== undefined && args.durationMs !== undefined
-      if (isLoad) {
-        const opts: LoadOptions = {
+
+      // Build the per-run inner closure. Each watch iteration calls this with
+      // a fresh signal; non-watch invokes it once with `ac.signal`.
+      const innerRun = async (signal: AbortSignal) => {
+        if (isLoad) {
+          const opts: LoadOptions = {
+            workflowPath,
+            env: args.env,
+            outPath: args.outPath,
+            perRequestTimeoutMs: args.timeoutMs,
+            userAgent: args.userAgent,
+            insecure: args.insecure,
+            quiet: args.quiet,
+            signal,
+            concurrency: args.concurrency!,
+            durationMs: args.durationMs!,
+            rps: args.rps,
+            warmupMs: args.warmupMs,
+            cookiesDir: args.cookiesDir,
+            harDir: args.harDir,
+            harReplayPath: args.harReplayPath,
+          }
+          const load = await runLoad(opts)
+          if (!args.quiet) printLoadSummary(load)
+          if (load.endedBy === "error") throw load.failure ?? new Error("load run failed")
+          return
+        }
+        const opts: RunOptions = {
           workflowPath,
           env: args.env,
           outPath: args.outPath,
@@ -75,37 +105,36 @@ export async function main(argv: string[]): Promise<number> {
           userAgent: args.userAgent,
           insecure: args.insecure,
           quiet: args.quiet,
-          signal: ac.signal,
-          concurrency: args.concurrency!,
-          durationMs: args.durationMs!,
-          rps: args.rps,
-          warmupMs: args.warmupMs,
+          signal,
+          cookiesDir: args.cookiesDir,
+          harDir: args.harDir,
+          harReplayPath: args.harReplayPath,
         }
-        const load = await runLoad(opts)
-        if (!args.quiet) printLoadSummary(load)
-        return load.endedBy === "error" ? 1 : 0
+        const result = await runWorkflow(opts)
+        if (!result.ok) {
+          const err = result.error as { name?: string; message?: string }
+          process.stderr.write(`${err?.name ?? "Error"}: ${err?.message ?? String(err)}\n`)
+          throw result.error
+        }
+        if (!args.quiet && result.value !== undefined) {
+          process.stdout.write(JSON.stringify(result.value, null, 2) + "\n")
+        }
       }
 
-      const opts: RunOptions = {
-        workflowPath,
-        env: args.env,
-        outPath: args.outPath,
-        perRequestTimeoutMs: args.timeoutMs,
-        userAgent: args.userAgent,
-        insecure: args.insecure,
-        quiet: args.quiet,
-        signal: ac.signal,
+      if (args.watch) {
+        return await runWatched(workflowPath, innerRun, {
+          signal: ac.signal,
+          mode: args.watchMode,
+          quiet: args.quiet,
+        })
       }
-      const result = await runWorkflow(opts)
-      if (!result.ok) {
-        const err = result.error as { name?: string; message?: string }
-        process.stderr.write(`${err?.name ?? "Error"}: ${err?.message ?? String(err)}\n`)
+
+      try {
+        await innerRun(ac.signal)
+        return 0
+      } catch {
         return 1
       }
-      if (!args.quiet && result.value !== undefined) {
-        process.stdout.write(JSON.stringify(result.value, null, 2) + "\n")
-      }
-      return 0
     }
     return 2
   } catch (err) {

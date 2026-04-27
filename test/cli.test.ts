@@ -98,6 +98,49 @@ describe("parseCli", () => {
     expect(a.quiet).toBe(true)
     expect(a.insecure).toBe(true)
   })
+
+  it("--watch on `run` is allowed", () => {
+    const a = parseCli(["run", "f.mjs", "--watch"])
+    expect(a.watch).toBe(true)
+    expect(a.watchMode).toBe("eager")
+  })
+
+  it("--watch-mode lazy parsed", () => {
+    const a = parseCli(["run", "f.mjs", "--watch", "--watch-mode", "lazy"])
+    expect(a.watchMode).toBe("lazy")
+  })
+
+  it("--watch-mode bogus value → CliError", () => {
+    expect(() => parseCli(["run", "f.mjs", "--watch", "--watch-mode", "weird"])).toThrow(/watch-mode/)
+  })
+
+  it("--watch on adhoc mode → CliError", () => {
+    expect(() => parseCli(["GET", "http://x/", "--watch"])).toThrow(/--watch only valid with `run`/)
+  })
+
+  it("--cookies <dir>", () => {
+    const a = parseCli(["run", "f.mjs", "--cookies", "./jar"])
+    expect(a.cookiesDir).toBe("./jar")
+  })
+
+  it("--har <dir>", () => {
+    const a = parseCli(["run", "f.mjs", "--har", "./har-out"])
+    expect(a.harDir).toBe("./har-out")
+  })
+
+  it("--cookies on adhoc mode is allowed (single-VU file: dir/vu-0.json)", () => {
+    const a = parseCli(["GET", "http://x/", "--cookies", "./jar"])
+    expect(a.cookiesDir).toBe("./jar")
+  })
+
+  it("--har-replay <path>", () => {
+    const a = parseCli(["run", "f.mjs", "--har-replay", "./fixture.har"])
+    expect(a.harReplayPath).toBe("./fixture.har")
+  })
+
+  it("--har + --har-replay together → CliError", () => {
+    expect(() => parseCli(["run", "f.mjs", "--har", "./out", "--har-replay", "./in"])).toThrow(/cannot be combined/)
+  })
 })
 
 let server: Server

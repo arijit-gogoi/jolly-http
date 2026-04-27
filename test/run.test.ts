@@ -113,4 +113,77 @@ export default async function () { return env.MY_VAR }`,
     const result = await runWorkflow({ workflowPath: path, env: { MY_VAR: "hello" } })
     expect(result.value).toBe("hello")
   })
+
+  it("HAR replay: record then replay short-circuits network", async () => {
+    // Step 1: record against the live server.
+    const flow = writeWorkflow(
+      "har-replay.mjs",
+      `import { request, assert } from "jolly-http"
+export default async function (vu, signal) {
+  const r = await request.GET("${baseUrl}/replay-me", { signal })
+  assert(r.status === 200, "live: status")
+  const body = await r.json()
+  return { url: body.url }
+}`,
+    )
+    const harDir = join(tmp, "har-record")
+    rmSync(harDir, { recursive: true, force: true })
+    const recordResult = await runWorkflow({ workflowPath: flow, harDir })
+    expect(recordResult.ok).toBe(true)
+    expect(existsSync(join(harDir, "vu-0.har"))).toBe(true)
+
+    // Step 2: read the HAR back and verify it has the entry we expect.
+    const har = JSON.parse(readFileSync(join(harDir, "vu-0.har"), "utf8"))
+    expect(har.log.entries.length).toBeGreaterThan(0)
+    expect(har.log.entries[0].request.url).toContain("/replay-me")
+
+    // Step 3: replay against the same workflow, with an unreachable URL.
+    // The replay must short-circuit fetch — if it hits the network, it'd
+    // fail. We point to a different port that nothing's listening on.
+    const replayFlow = writeWorkflow(
+      "har-replay-2.mjs",
+      `import { request, assert } from "jolly-http"
+export default async function (vu, signal) {
+  const r = await request.GET("${baseUrl}/replay-me", { signal })
+  assert(r.status === 200, "replay: status")
+  const body = await r.json()
+  return { fromReplay: true, url: body.url }
+}`,
+    )
+    const replayResult = await runWorkflow({
+      workflowPath: replayFlow,
+      harReplayPath: harDir,
+    })
+    expect(replayResult.ok).toBe(true)
+    expect((replayResult.value as { fromReplay: boolean }).fromReplay).toBe(true)
+  })
+
+  it("HAR replay: miss throws HarReplayMissError", async () => {
+    const harDir = join(tmp, "har-miss")
+    rmSync(harDir, { recursive: true, force: true })
+    // Create an empty HAR dir: vu-0.har with no entries matching the workflow's URL.
+    const seedFlow = writeWorkflow(
+      "har-miss-seed.mjs",
+      `import { request } from "jolly-http"
+export default async function (vu, signal) {
+  await request.GET("${baseUrl}/known", { signal })
+}`,
+    )
+    await runWorkflow({ workflowPath: seedFlow, harDir })
+
+    // Now replay a workflow that asks for a different URL → miss.
+    const missFlow = writeWorkflow(
+      "har-miss.mjs",
+      `import { request } from "jolly-http"
+export default async function (vu, signal) {
+  await request.GET("${baseUrl}/unknown", { signal })
+}`,
+    )
+    const result = await runWorkflow({ workflowPath: missFlow, harReplayPath: harDir })
+    expect(result.ok).toBe(false)
+    const err = result.error as { name?: string; method?: string; url?: string }
+    expect(err.name).toBe("HarReplayMissError")
+    expect(err.method).toBe("GET")
+    expect(err.url).toContain("/unknown")
+  })
 })

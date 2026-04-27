@@ -2,6 +2,8 @@ import { scope, sleep, yieldNow, isStructuralCancellation } from "jolly-coop"
 import { buildEnv, withRuntime, type RuntimeContext } from "./runtime.js"
 import { createSampleSink } from "./output.js"
 import { loadWorkflow } from "./run.js"
+import { createCookieJar, loadCookieJar, saveCookieJar, cookieJarPath, type CookieJar } from "./cookies.js"
+import { createHarRecorder, saveHar, harPath, loadHarReplay, type HarRecorder, type HarReplayer } from "./har.js"
 import type { LoadOptions, Sample, SampleSink, VuContext, WorkflowFn } from "./types.js"
 
 /**
@@ -52,7 +54,7 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
   const deadline = Date.now() + opts.durationMs
   const completed = { n: 0 }
   const rateLimiter = opts.rps !== undefined ? new RateLimiter(opts.rps) : undefined
-  const userAgent = opts.userAgent ?? `jolly-http/0.1.1`
+  const userAgent = opts.userAgent ?? `jolly-http/0.2.0`
 
   let endedBy: EndedBy = "drained"
   let failure: unknown
@@ -77,6 +79,24 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
 
       await scope({ limit: opts.concurrency, signal: root.signal }, async pool => {
         for (let i = 0; i < opts.concurrency; i++) {
+          // Per-VU resources: cookie jar + HAR recorder. Registered as pool
+          // resources so they're saved (LIFO) on cancel/abort/done — Ari's
+          // "did my cookies survive Ctrl-C?" moment is preserved.
+          const cookieJar = opts.cookiesDir
+            ? await pool.resource(loadCookieJar(cookieJarPath(opts.cookiesDir, i)), j => {
+                saveCookieJar(j, cookieJarPath(opts.cookiesDir!, i))
+              })
+            : undefined
+          const harRecorder = opts.harDir
+            ? await pool.resource(createHarRecorder("0.2.0"), r => {
+                saveHar(r, harPath(opts.harDir!, i))
+              })
+            : undefined
+          // Replayer per VU. If path is a file (.har), loadHarReplay caches
+          // and returns the same instance for every VU — shared in load mode.
+          const harReplay = opts.harReplayPath
+            ? loadHarReplay(opts.harReplayPath, i)
+            : undefined
           pool.spawn(() =>
             runVu({
               vuId: i,
@@ -92,6 +112,9 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
                 perRequestTimeoutMs: opts.perRequestTimeoutMs,
                 insecure: opts.insecure,
               },
+              cookieJar,
+              harRecorder,
+              harReplay,
               onOutcome: s => stats.push(s),
             }),
           )
@@ -137,6 +160,9 @@ interface VuCtx {
   rateLimiter?: RateLimiter
   completed: { n: number }
   defaults: { userAgent: string; perRequestTimeoutMs?: number; insecure?: boolean }
+  cookieJar?: CookieJar
+  harRecorder?: HarRecorder
+  harReplay?: HarReplayer
   onOutcome: (sample: Sample) => void
 }
 
@@ -178,6 +204,9 @@ async function oneIteration(ctx: VuCtx, iteration: number): Promise<Sample | und
     signal: ctx.signal,
     tZero: ctx.tZero,
     defaults: ctx.defaults,
+    cookieJar: ctx.cookieJar,
+    harRecorder: ctx.harRecorder,
+    harReplay: ctx.harReplay,
   }
 
   try {

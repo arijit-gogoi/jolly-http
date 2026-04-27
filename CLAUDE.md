@@ -14,7 +14,7 @@ A single CLI with three modes that share one mental model:
 jolly-http GET https://api/users                    # ad-hoc, like httpie/xh
 jolly-http run flow.mjs                             # workflow file, sequential
 jolly-http run flow.mjs -c 50 -d 30s                # workflow under load
-jolly-http run flow.mjs --watch                     # rerun on file change (v0.2)
+jolly-http run flow.mjs --watch                     # rerun on file change
 ```
 
 The workflow file is a normal `.mjs` module exporting `default async function (vu, signal) => any`. That signature is the frozen contract (see [spec/SPEC.md § 3](spec/SPEC.md#3-workflow-file-format-frozen)).

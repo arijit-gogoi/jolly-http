@@ -36,11 +36,14 @@ jolly-http run flow.mjs --out responses.ndjson        # record per-request sampl
 
 - `--header, -H <k:v>` (repeatable)
 - `--timeout <dur>` — per-request, applies to all requests in workflow
-- `--insecure, -k` — skip TLS validation (v0.2; parsed but not yet wired)
+- `--insecure, -k` — skip TLS validation (v0.3; parsed but not yet wired)
 - `--user-agent <str>` — default `jolly-http/${VERSION}`
 - `--quiet, -q` — suppress per-request output
 - `--out <path>` — NDJSON sample file
 - `--env KEY=VAL` (repeatable)
+- `--cookies <dir>` — persist cookies as `<dir>/vu-N.json` (per-VU files)
+- `--har <dir>` — record HAR as `<dir>/vu-N.har` (per-VU files)
+- `--har-replay <path>` — replay responses from a recorded HAR; `*.har` file is shared across VUs, directory is per-VU. Strict match on method + url + body. Misses throw `HarReplayMissError`. Cannot be combined with `--har`.
 - `--help, -h`, `--version, -V`
 
 ### Load-mode options
@@ -49,6 +52,11 @@ jolly-http run flow.mjs --out responses.ndjson        # record per-request sampl
 - `-d, --duration <dur>` — total duration
 - `--rps <n>` — target aggregate requests/sec
 - `--warmup <dur>` — exclude first N from stats
+
+### Watch-mode options (run only)
+
+- `--watch` — rerun the workflow file on change
+- `--watch-mode <eager|lazy>` — `eager` (default) cancels in-flight runs on file change; `lazy` queues changes and waits for the current run to finish first
 
 ### Body shorthand (httpie-compatible subset)
 
@@ -121,6 +129,7 @@ interface RequestInit {
   timeout?: string | number                // "5s", 1000 — per-request
   signal?: AbortSignal                     // composed with scope signal
   redirect?: "follow" | "manual" | "error"
+  cookies?: boolean                        // false → opt this request out of the per-VU jar (v0.2+)
 }
 ```
 
@@ -174,20 +183,28 @@ The internal scope tree, resource discipline, and runtime-context plumbing is im
 
 ## 6. Out of scope (deliberate)
 
-Features explicitly NOT part of v0.1.x. Listed here so the boundary is visible, not hidden:
+Features explicitly NOT part of the current release. Listed here so the boundary is visible, not hidden:
 
-- `--watch` mode (file-change rerun) — deferred to v0.2
-- HAR recording / replay — v0.2
-- Cookie jar persistence — v0.2
+**Deferred to v0.3 (planned):**
+
+- `--insecure` wiring — flag is parsed but inert pending undici-dispatcher integration
+- `.env` file import
+- Cookie domain/public-suffix list (PSL) handling
+- HAR replay matching modes beyond strict (loose, sequential, permissive miss)
+
+**Deferred indefinitely:**
+
 - HTTP/2, HTTP/3, WebSockets, Server-Sent Events
 - Output formats beyond raw + JSON (use `jq`/`yq`/`miller`)
-- `.env` file import — v0.3
 - Mocking / fixtures
 - GUI
 - OpenAPI generation / inference
 - Response diffing
 - Auth helpers (OAuth2 flows, AWS SigV4, etc.) — workflow authors write their own
 - Retry helpers — workflow authors write their own
+- Multi-file workflow imports
+
+**Shipped in v0.2:** `--watch`, cookie jar with `--cookies <dir>`, HAR recording with `--har <dir>`, HAR replay with `--har-replay <path>`.
 
 ### Principle
 
