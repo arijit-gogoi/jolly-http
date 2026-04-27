@@ -151,11 +151,26 @@ await request.GET(`${env.API}/me`)               // cookie sent automatically
 await request.GET(`${env.API}/public`, { cookies: false })  // opt out per call
 ```
 
-`--cookies <dir>` adds **disk persistence** (load on start, save on exit, including `Ctrl-C`):
+Without `--cookies`, the jar is **in-memory only** and discarded when the run ends — every invocation starts with a fresh session.
+
+### `--cookies <dir>` adds disk persistence
 
 ```sh
 jolly-http run flow.mjs --cookies ./jar
 ls jar/    # → vu-0.json (per-VU files in load mode: vu-0.json, vu-1.json, …)
+```
+
+`--cookies <dir>` is **session-continuity by design**, the same model as `httpie --session=name`, `xh --session=name`, and `curl --cookie-jar`:
+
+- **First run** with a fresh `<dir>`: jar starts empty, server-set cookies are saved to `<dir>/vu-N.json` on exit (including `Ctrl-C`).
+- **Subsequent runs** with the same `<dir>`: jar is **loaded from disk first**, so prior-session cookies are sent on the very first request. Workflow code that expects a logged-out starting state (e.g. testing the login flow itself) will see the prior session.
+
+If you want fresh-each-run with `--cookies <dir>` semantics (audit trail, but no carryover):
+
+```sh
+rm -rf ./jar && jolly-http run flow.mjs --cookies ./jar     # explicit reset
+jolly-http run flow.mjs --cookies "./jar-$(date +%s)"        # unique per run
+jolly-http run flow.mjs                                      # don't persist at all
 ```
 
 The jar implements RFC 6265 (Domain/Path/Secure/HttpOnly/Expires/Max-Age). It does not handle the public-suffix list or third-party cookie blocking — those are browser concerns.
