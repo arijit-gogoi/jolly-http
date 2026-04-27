@@ -1,4 +1,4 @@
-export const VERSION = "0.3.0"
+export const VERSION = "0.3.1"
 
 export { request, performRequest } from "./request.js"
 export { parseDotenv, readEnvKeys, loadEnvFile } from "./dotenv.js"

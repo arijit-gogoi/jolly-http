@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { scope, isStructuralCancellation } from "jolly-coop"
 import { buildEnv, withRuntime, type RuntimeContext } from "./runtime.js"
 import { createSampleSink } from "./output.js"
-import { loadCookieJar, saveCookieJar, cookieJarPath } from "./cookies.js"
+import { createCookieJar, loadCookieJar, saveCookieJar, cookieJarPath } from "./cookies.js"
 import { createHarRecorder, saveHar, harPath, loadHarReplay } from "./har.js"
 import { loadEnvFile, readEnvKeys } from "./dotenv.js"
 import type { RunOptions, RunResult, WorkflowFn } from "./types.js"
@@ -115,13 +115,17 @@ export async function runWorkflowFn(fn: WorkflowFn, opts: RunOptions): Promise<R
       close: () => sink.close(),
     }
     // Single-run uses vu-0.* — same naming as load for tooling consistency.
+    // The jar is always present so cookies flow within a workflow run
+    // (login → me-call works without --cookies). --cookies <dir> only adds
+    // disk persistence (load-from + save-to). In-memory jar = GC handles cleanup;
+    // persistent jar = scope resource so save fires on cancel/abort/done.
     const cookieJar = opts.cookiesDir
       ? await s.resource(loadCookieJar(cookieJarPath(opts.cookiesDir, 0)), j => {
           saveCookieJar(j, cookieJarPath(opts.cookiesDir!, 0))
         })
-      : undefined
+      : createCookieJar()
     const harRecorder = opts.harDir
-      ? await s.resource(createHarRecorder("0.3.0"), r => {
+      ? await s.resource(createHarRecorder("0.3.1"), r => {
           saveHar(r, harPath(opts.harDir!, 0))
         })
       : undefined

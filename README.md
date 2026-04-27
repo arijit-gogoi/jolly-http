@@ -10,7 +10,7 @@ Simplicity of httpie, speed of xh, plus a thing neither has: **the same `.mjs` f
 npm install -g jolly-http
 ```
 
-Requires Node.js ≥ 22.
+Requires Node.js ≥ 22. Also runs on Bun and Deno via the published npm package.
 
 ## Three modes, one mental model
 
@@ -68,7 +68,7 @@ export default async function (vu, signal) {
 jolly-http run flow.mjs -c 50 -d 30s --out samples.ndjson
 ```
 
-The same file. No rewriting, no separate load-test DSL. Load mode delegates to [jolly-bench](https://github.com/arijit-gogoi/jolly-bench) in-process, so `SIGINT` still propagates cleanly and per-request samples go to NDJSON.
+The same file. No rewriting, no separate load-test DSL. SIGINT propagates through the in-process load runner; per-request samples go to NDJSON.
 
 ## Workflow API (frozen — permanent public surface)
 
@@ -84,17 +84,17 @@ request.GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS (url, init) → Respo
 
 init: {
   headers?: Record<string,string>
-  json?: unknown           // sets body to JSON + content-type
+  json?: unknown                // sets body to JSON + content-type
   form?: Record<string,string>  // url-encoded
   body?: string | Uint8Array
   query?: Record<string, string | number | boolean>
   timeout?: string | number     // "5s", 1000
   signal?: AbortSignal          // composed with scope signal
-  cookies?: boolean             // false → opt out of the per-VU cookie jar
+  cookies?: boolean             // false → opt this request out of the jar
 }
 
-assert(cond, msg?) → throws AssertionError when falsy
-env.FOO                         // read environment (--env flags + process.env)
+assert(cond, msg?)              // throws AssertionError when falsy
+env.FOO                         // --env flags + process.env + .env files
 sleep("200ms" | 200)            // signal-aware
 ```
 
@@ -105,7 +105,6 @@ sleep("200ms" | 200)            // signal-aware
 --json <str>           Body as JSON string (overrides shorthand)
 --form                 Send x-www-form-urlencoded
 --timeout <dur>        Per-request timeout ("500ms", "30s", "2m")
---insecure, -k         (parsed; see "Self-signed certs" below for the working alternative)
 --user-agent <str>     Override User-Agent
 --quiet, -q            Suppress per-request output
 --out <path>           Append NDJSON samples to path
@@ -113,9 +112,10 @@ sleep("200ms" | 200)            // signal-aware
 --env-file <path>      Load env vars from a file (repeatable; later wins)
 --no-env-file          Skip auto-loading ./.env
 --require-env <path>   Fail-fast if any key from <path> is unset/empty
---cookies <dir>        Persist cookies as <dir>/vu-N.json
+--cookies <dir>        Persist cookies as <dir>/vu-N.json (jar is always on)
 --har <dir>            Record HAR as <dir>/vu-N.har
 --har-replay <path>    Replay responses from a recorded HAR (file or dir)
+--insecure, -k         (no-op; see "Self-signed certs" below)
 
 Load mode:
   -c, --concurrency <n>  Virtual users
@@ -132,40 +132,39 @@ Exit codes: `0` success · `1` fatal or assertion failure · `2` bad args · `13
 
 ## NDJSON schema
 
-Each line is one HTTP request (success or error) emitted by the workflow's `request.*` calls:
+One line per HTTP request emitted by `request.*`:
 
 ```json
 {"ok":true,"t":0.142,"vu":7,"iteration":0,"method":"POST","url":"https://api/login","status":200,"duration_ms":38.2,"size":312,"ts":"2026-04-18T03:14:15.926Z"}
 {"ok":false,"t":0.191,"vu":3,"iteration":1,"method":"GET","url":"https://api/me","duration_ms":501.1,"error":"AbortError","message":"request timed out after 500ms","ts":"2026-04-18T03:14:16.427Z"}
 ```
 
-The same shape in single-run and load mode — any tool that reads one reads both.
+Same shape in single-run and load mode — any tool that reads one reads both.
 
 ## Cookies
 
-Cookies are auto-included on outbound requests when a per-VU jar is present, and the jar absorbs `Set-Cookie` headers from responses. Pass `--cookies <dir>` to persist:
+**Cookies are on by default.** Each workflow run gets a per-VU jar that auto-includes cookies on outbound requests and absorbs `Set-Cookie` headers from responses. A login → me-call workflow Just Works without configuration.
+
+```js
+await request.GET(`${env.API}/login`)            // jar absorbs Set-Cookie
+await request.GET(`${env.API}/me`)               // cookie sent automatically
+await request.GET(`${env.API}/public`, { cookies: false })  // opt out per call
+```
+
+`--cookies <dir>` adds **disk persistence** (load on start, save on exit, including `Ctrl-C`):
 
 ```sh
 jolly-http run flow.mjs --cookies ./jar
 ls jar/    # → vu-0.json (per-VU files in load mode: vu-0.json, vu-1.json, …)
 ```
 
-Run again with the same `--cookies <dir>` to reuse the previous session.
-
-Opt out per-call with `init.cookies: false`:
-
-```js
-const r = await request.GET(`${env.API}/public`, { signal, cookies: false })
-```
-
-The jar implements RFC 6265 (Domain/Path/Secure/HttpOnly/Expires/Max-Age). It deliberately does not handle public-suffix-list (PSL) restrictions or third-party cookie blocking — those are browser concerns.
+The jar implements RFC 6265 (Domain/Path/Secure/HttpOnly/Expires/Max-Age). It does not handle the public-suffix list or third-party cookie blocking — those are browser concerns.
 
 ## Environment files
 
-`./.env` is auto-loaded from your current directory if present. Pass values to your workflow via the frozen `env` import:
+`./.env` is auto-loaded from cwd if present. Read values via the frozen `env` import:
 
 ```js
-import { env } from "jolly-http"
 const res = await request.GET(`${env.API_BASE}/users`, {
   headers: { authorization: `Bearer ${env.API_TOKEN}` },
   signal,
@@ -175,42 +174,32 @@ const res = await request.GET(`${env.API_BASE}/users`, {
 ### Precedence (highest wins)
 
 ```
---env KEY=VAL  >  process.env  >  --env-file files (later > earlier)  >  auto-loaded ./.env
+--env KEY=VAL  >  process.env  >  --env-file files (later > earlier)  >  auto ./.env
 ```
 
-So a value in `./.env` is the project default, your shell's exported value overrides it, and a `--env` flag wins everything. Same as dotenv, Next.js, Vite, every modern framework.
-
-### Multi-file & explicit loading
+Same as dotenv, Next.js, Vite, every modern framework.
 
 ```sh
 jolly-http run flow.mjs --env-file .env.staging              # one file, no auto-load
 jolly-http run flow.mjs --env-file .env --env-file .env.local # later overrides earlier
-jolly-http run flow.mjs --no-env-file                        # skip ./.env entirely
+jolly-http run flow.mjs --no-env-file                        # skip ./.env
 ```
 
-Explicit `--env-file` disables auto-loading `./.env` (otherwise users would get surprised by both files merging).
+Explicit `--env-file` disables auto-loading `./.env`.
 
 ### Validation with `--require-env`
 
 Pair a committed `.env.example` (placeholder values, in git) with a gitignored `.env`:
 
 ```sh
-# .env.example (committed)
-API_BASE=
-API_TOKEN=
+# .env.example          # .env (gitignored)
+API_BASE=               API_BASE=https://api.example.com
+API_TOKEN=              API_TOKEN=tok-xyz
 
-# .env (gitignored)
-API_BASE=https://api.example.com
-API_TOKEN=tok-xyz
-```
-
-Run with both flags:
-
-```sh
 jolly-http run flow.mjs --env-file .env --require-env .env.example
 ```
 
-If any key listed in `.env.example` is unset or empty after the merge, the run fails fast *before* the workflow's first request:
+If any key listed in `.env.example` is unset or empty after the merge, the run fails fast *before* the workflow's first request, listing every missing key:
 
 ```
 missing required env vars from .env.example:
@@ -233,7 +222,7 @@ line2"
 export FOO=bar     # bash-compat prefix; "export " is stripped
 ```
 
-`${VAR}` interpolation only resolves against keys defined earlier *in the same file*. Bare `$VAR` is treated as literal text — no surprise eating of `$1`, `$@`, or currency strings.
+`${VAR}` interpolation only resolves against keys defined earlier *in the same file*. Bare `$VAR` is literal — no eating of `$1`, `$@`, currency strings.
 
 ## Watch mode
 
@@ -241,15 +230,13 @@ Rerun on workflow file change:
 
 ```sh
 jolly-http run flow.mjs --watch                       # eager (default)
-jolly-http run flow.mjs --watch --watch-mode lazy     # queue, finish current run first
+jolly-http run flow.mjs --watch --watch-mode lazy     # queue, finish current first
 ```
 
-- **eager**: file change cancels in-flight requests immediately and starts a new run. Matches `nodemon`/`vitest` UX. Fast feedback; may abort mid-flight requests.
-- **lazy**: file change queues; current run finishes naturally, then reload. No aborts. Use when in-flight cancellation would corrupt downstream state.
+- **eager** — cancel in-flight requests and start a new run. Matches `nodemon`/`vitest`. Fast feedback.
+- **lazy** — queue file changes; current run finishes naturally, then reload.
 
-Watch mode plays nicely with `-c` and `-d`: `jolly-http run flow.mjs --watch -c 50 -d 30s` reruns the load on every change.
-
-Ctrl-C exits 130 cleanly.
+Watch composes with load mode: `jolly-http run flow.mjs --watch -c 50 -d 30s` reruns the load on every change. Ctrl-C exits 130.
 
 ## HAR recording
 
@@ -260,73 +247,57 @@ jolly-http run flow.mjs --har ./har-out
 ls har-out/    # → vu-0.har (per-VU in load: vu-0.har, vu-1.har, …)
 ```
 
-Each `.har` file is HAR 1.2 — open in Chrome DevTools (Network → Import HAR), Firefox, or any HAR viewer. Bodies are truncated to 64 KB to keep files small in long load runs.
+HAR 1.2 — opens in Chrome DevTools (Network → Import HAR), Firefox, or any HAR viewer. Bodies truncated to 64 KB.
 
 ### Replay
 
-Re-run a workflow against canned responses from a previously-recorded HAR — useful for offline debugging, deterministic CI, or sharing fixtures with teammates.
+Re-run a workflow against canned responses from a recorded HAR — useful for offline debugging, deterministic CI, or sharing fixtures:
 
 ```sh
-# Record once.
-jolly-http run flow.mjs --har ./fixtures
-# Replay anywhere — no network needed.
-jolly-http run flow.mjs --har-replay ./fixtures
-# Or share a single file across VUs.
-jolly-http run flow.mjs --har-replay ./fixtures/vu-0.har
+jolly-http run flow.mjs --har ./fixtures              # record once
+jolly-http run flow.mjs --har-replay ./fixtures       # replay (per-VU dir)
+jolly-http run flow.mjs --har-replay ./fixtures/vu-0.har  # replay (single shared file)
 ```
 
-The path argument auto-detects:
+Path auto-detects: `*.har` → shared file across VUs; directory → `<dir>/vu-N.har` per VU.
 
-- **File path ending in `.har`** → all VUs share the same HAR.
-- **Directory path** → each VU reads `<dir>/vu-N.har` (mirrors the `--har` recording layout).
+Matching is **strict**: `(method, full URL with query, request body)` must match an entry exactly. First-match-wins, no consume — workflows that loop over the same endpoint replay correctly. Misses throw `HarReplayMissError` (with `.method`, `.url`); CLI exits 1.
 
-Matching is strict: `(method, full URL with query, request body)` must match an entry exactly. First-match-wins, no consume — workflows that loop over the same endpoint replay correctly.
-
-When a request has no matching entry, `request.GET` throws `HarReplayMissError` with `.method` and `.url` for inspection. Workflows can catch it; CLI exits 1.
-
-**Combining flags:** `--har` and `--har-replay` cannot both be set (chained record-from-replay would be confusing).
+`--har` and `--har-replay` cannot both be set.
 
 **Caveats:**
-
-- Form bodies (`URLSearchParams`) match by exact string, so field order matters between record and replay. Use `json:` for canonical ordering.
-- Request headers are not part of the match (so cookie drift between record and replay is tolerated).
-- Multipart bodies have non-deterministic boundaries and aren't reliably replayable.
+- Form bodies (`URLSearchParams`) match by exact string — field order matters. Use `json:` for canonical ordering.
+- Headers are not part of the match (cookie drift between record/replay is tolerated).
+- Multipart bodies have non-deterministic boundaries; not reliably replayable.
 
 ## Self-signed certs / internal CAs
 
-For dev servers using self-signed certificates, internal CAs not in the system trust store, or any TLS validation skip — use your runtime's built-in flag rather than a CLI option. They're battle-tested, portable across runtimes, and don't add to jolly-http's dependency footprint:
+To skip TLS validation, use your runtime's built-in flag — cross-runtime, zero-dep, properly scoped:
 
 ```sh
-# Node
-NODE_TLS_REJECT_UNAUTHORIZED=0 jolly-http run flow.mjs
-
-# Bun
-bun --tls-no-verify run jolly-http run flow.mjs
-
-# Deno
-deno run --unsafely-ignore-certificate-errors jolly-http run flow.mjs
+NODE_TLS_REJECT_UNAUTHORIZED=0 jolly-http run flow.mjs    # Node
+bun --tls-no-verify run jolly-http run flow.mjs           # Bun
+deno run --unsafely-ignore-certificate-errors jolly-http run flow.mjs  # Deno
 ```
 
-These apply to the entire process, which is the right scope for a CLI that runs once and exits. Node will print a warning to stderr — that's intentional UX: when you ask for insecure, you should see that you got it.
+Node prints a stderr warning — that's intentional UX. The proper fix for internal CAs is your system trust store; the runtime flags are an escape hatch for CI / dev iteration.
 
-The proper long-term fix for internal CAs is to add the corporate certificate to your system's trust store (then no flag is needed). The runtime flags above are an escape hatch for cases where that's not feasible (CI, ephemeral environments, dev iteration).
-
-> The `--insecure, -k` CLI flag is currently a no-op; the runtime mechanisms above are the supported way to skip TLS validation. The flag may be removed in a future major version.
+> The `--insecure, -k` CLI flag is a no-op and may be removed in a future major.
 
 ## Why `.mjs`?
 
 Workflows are real JavaScript modules, not a DSL:
 
 - **No parser divergence** — if it runs in Node, it works.
-- **Editor support is free** — your ESLint, Prettier, TypeScript JSDoc, and go-to-definition all already work.
+- **Editor support is free** — ESLint, Prettier, TypeScript JSDoc, go-to-definition all work.
 - **Helpers compose.** Write a retry wrapper, import it in three workflows.
-- **Load and debug are the same file.** No "production config" drift vs. "test script" drift.
+- **Load and debug are the same file.** No "production config" vs. "test script" drift.
 
 ## Philosophy
 
-Small surface, permanent contract. The workflow function signature (`(vu, signal)`) and the three runtime imports (`request`, `assert`, `env`) are the API. Everything else is implementation detail and can change.
+Small surface, permanent contract. The workflow function signature (`(vu, signal)`) and the four runtime imports (`request`, `assert`, `env`, `sleep`) are the API. Everything else is implementation detail and can change.
 
-Hurl and httpyac drowned in feature creep. jolly-http picks a different tradeoff: the power comes from the `.mjs` file being real JavaScript, not from a thousand config options.
+Hurl and httpyac drowned in feature creep. jolly-http picks a different tradeoff: power comes from the `.mjs` file being real JavaScript, not from a thousand config options.
 
 ## License
 

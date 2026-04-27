@@ -16,6 +16,20 @@ beforeAll(async () => {
       res.end("boom")
       return
     }
+    if (req.url === "/set-cookie") {
+      res.setHeader("set-cookie", "sess=abc123; Path=/")
+      res.statusCode = 200
+      res.setHeader("content-type", "application/json")
+      res.end('{"set":true}')
+      return
+    }
+    if (req.url === "/needs-cookie") {
+      const got = req.headers.cookie ?? ""
+      res.statusCode = got.includes("sess=abc123") ? 200 : 401
+      res.setHeader("content-type", "application/json")
+      res.end(JSON.stringify({ cookieReceived: got }))
+      return
+    }
     res.statusCode = 200
     res.setHeader("content-type", "application/json")
     res.end(JSON.stringify({ ok: true, url: req.url }))
@@ -156,6 +170,41 @@ export default async function (vu, signal) {
     })
     expect(replayResult.ok).toBe(true)
     expect((replayResult.value as { fromReplay: boolean }).fromReplay).toBe(true)
+  })
+
+  it("cookies flow within a workflow run WITHOUT --cookies (always-on jar)", async () => {
+    const path = writeWorkflow(
+      "cookieflow.mjs",
+      `import { request, assert } from "jolly-http"
+export default async function (vu, signal) {
+  const set = await request.GET("${baseUrl}/set-cookie", { signal })
+  assert(set.status === 200, "set: " + set.status)
+  const echo = await request.GET("${baseUrl}/needs-cookie", { signal })
+  assert(echo.status === 200, "echo: " + echo.status)
+  return await echo.json()
+}`,
+    )
+    // No cookiesDir passed — jar must still be present in-memory.
+    const result = await runWorkflow({ workflowPath: path })
+    expect(result.ok).toBe(true)
+    expect((result.value as { cookieReceived: string }).cookieReceived).toContain("sess=abc123")
+  })
+
+  it("opt-out per-call via init.cookies: false", async () => {
+    const path = writeWorkflow(
+      "cookieoptout.mjs",
+      `import { request, assert } from "jolly-http"
+export default async function (vu, signal) {
+  await request.GET("${baseUrl}/set-cookie", { signal })  // jar absorbs the cookie
+  const echo = await request.GET("${baseUrl}/needs-cookie", { signal, cookies: false })
+  // With cookies: false, cookie header is NOT sent → server returns 401
+  assert(echo.status === 401, "expected 401 (no cookie sent), got " + echo.status)
+  return { optedOut: true }
+}`,
+    )
+    const result = await runWorkflow({ workflowPath: path })
+    expect(result.ok).toBe(true)
+    expect((result.value as { optedOut: boolean }).optedOut).toBe(true)
   })
 
   it("env-file: explicit --env-file loads vars into env", async () => {
