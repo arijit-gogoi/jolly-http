@@ -257,7 +257,7 @@ OPTIONS
   --json <str>              Set body to this JSON string (overrides shorthand)
   --form                    Use form encoding instead of JSON
   --timeout <dur>           Per-request timeout (e.g. 5s, 500ms)
-  --insecure, -k            [v0.3] Skip TLS validation (not yet wired)
+  --insecure, -k            [v0.4] Skip TLS validation (not yet wired)
   --user-agent <str>        Override User-Agent
   --quiet, -q               Suppress per-request output
   --out <path>              Write NDJSON samples to path

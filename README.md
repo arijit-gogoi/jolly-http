@@ -105,7 +105,7 @@ sleep("200ms" | 200)            // signal-aware
 --json <str>           Body as JSON string (overrides shorthand)
 --form                 Send x-www-form-urlencoded
 --timeout <dur>        Per-request timeout ("500ms", "30s", "2m")
---insecure, -k         [v0.3] Skip TLS validation (flag parsed, not yet wired)
+--insecure, -k         [v0.4] Skip TLS validation (flag parsed, not yet wired)
 --user-agent <str>     Override User-Agent
 --quiet, -q            Suppress per-request output
 --out <path>           Append NDJSON samples to path

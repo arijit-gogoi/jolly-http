@@ -36,7 +36,7 @@ jolly-http run flow.mjs --out responses.ndjson        # record per-request sampl
 
 - `--header, -H <k:v>` (repeatable)
 - `--timeout <dur>` — per-request, applies to all requests in workflow
-- `--insecure, -k` — skip TLS validation (v0.3; parsed but not yet wired)
+- `--insecure, -k` — skip TLS validation (v0.4; parsed but not yet wired)
 - `--user-agent <str>` — default `jolly-http/${VERSION}`
 - `--quiet, -q` — suppress per-request output
 - `--out <path>` — NDJSON sample file
