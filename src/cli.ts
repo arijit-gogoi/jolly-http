@@ -62,6 +62,9 @@ export async function main(argv: string[]): Promise<number> {
         cookiesDir: args.cookiesDir,
         harDir: args.harDir,
         harReplayPath: args.harReplayPath,
+        envFiles: args.envFiles,
+        noEnvFile: args.noEnvFile,
+        requireEnvPath: args.requireEnvPath,
       }
       const result = await runAdhoc(opts)
       return result.ok ? 0 : 1
@@ -91,6 +94,9 @@ export async function main(argv: string[]): Promise<number> {
             cookiesDir: args.cookiesDir,
             harDir: args.harDir,
             harReplayPath: args.harReplayPath,
+            envFiles: args.envFiles,
+            noEnvFile: args.noEnvFile,
+            requireEnvPath: args.requireEnvPath,
           }
           const load = await runLoad(opts)
           if (!args.quiet) printLoadSummary(load)
@@ -109,6 +115,9 @@ export async function main(argv: string[]): Promise<number> {
           cookiesDir: args.cookiesDir,
           harDir: args.harDir,
           harReplayPath: args.harReplayPath,
+          envFiles: args.envFiles,
+          noEnvFile: args.noEnvFile,
+          requireEnvPath: args.requireEnvPath,
         }
         const result = await runWorkflow(opts)
         if (!result.ok) {

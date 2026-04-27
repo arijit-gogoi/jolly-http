@@ -40,7 +40,10 @@ jolly-http run flow.mjs --out responses.ndjson        # record per-request sampl
 - `--user-agent <str>` — default `jolly-http/${VERSION}`
 - `--quiet, -q` — suppress per-request output
 - `--out <path>` — NDJSON sample file
-- `--env KEY=VAL` (repeatable)
+- `--env KEY=VAL` (repeatable) — set one workflow env var
+- `--env-file <path>` (repeatable) — load env vars from a file. Later files override earlier. If unset, `./.env` is auto-loaded if present.
+- `--no-env-file` — disable auto-loading `./.env`
+- `--require-env <path>` — fail-fast if any key from `<path>` is unset or empty in the merged env. Designed for `.env.example` files.
 - `--cookies <dir>` — persist cookies as `<dir>/vu-N.json` (per-VU files)
 - `--har <dir>` — record HAR as `<dir>/vu-N.har` (per-VU files)
 - `--har-replay <path>` — replay responses from a recorded HAR; `*.har` file is shared across VUs, directory is per-VU. Strict match on method + url + body. Misses throw `HarReplayMissError`. Cannot be combined with `--har`.
@@ -185,12 +188,12 @@ The internal scope tree, resource discipline, and runtime-context plumbing is im
 
 Features explicitly NOT part of the current release. Listed here so the boundary is visible, not hidden:
 
-**Deferred to v0.3 (planned):**
+**Deferred to v0.4 (planned):**
 
 - `--insecure` wiring — flag is parsed but inert pending undici-dispatcher integration
-- `.env` file import
 - Cookie domain/public-suffix list (PSL) handling
 - HAR replay matching modes beyond strict (loose, sequential, permissive miss)
+- Mode-based env file chains (`.env.production`, `.env.production.local`)
 
 **Deferred indefinitely:**
 
@@ -205,6 +208,16 @@ Features explicitly NOT part of the current release. Listed here so the boundary
 - Multi-file workflow imports
 
 **Shipped in v0.2:** `--watch`, cookie jar with `--cookies <dir>`, HAR recording with `--har <dir>`, HAR replay with `--har-replay <path>`.
+
+**Shipped in v0.3:** `.env` file loading with `--env-file <path>` (repeatable, with auto-load of `./.env`), `--no-env-file` opt-out, `--require-env <path>` validation against a `.env.example` schema.
+
+### Environment file precedence
+
+```
+--env KEY=VAL  >  process.env  >  --env-file files (later > earlier)  >  auto-loaded ./.env
+```
+
+Higher precedence overrides lower. Each `.env` file supports the dotenv dialect: `KEY=value`, double/single-quoted values (`"..."`/`'...'`), `${VAR}` interpolation against earlier keys *in the same file*, multiline values inside `"..."`, `# comments`, and `export KEY=value` (bash-compat prefix). Bare `$VAR` interpolation is **not** supported (avoids eating `$1`, `$@`, currency strings).
 
 ### Principle
 

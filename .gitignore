@@ -9,3 +9,11 @@ coverage/
 test/fixtures/run/
 test/fixtures/load/
 test/fixtures/integration/
+
+# Local env files; never commit. .env.example is committed as the schema.
+.env
+.env.local
+.env.*.local
+examples/.env
+examples/.env.local
+examples/.env.*.local

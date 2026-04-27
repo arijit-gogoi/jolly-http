@@ -110,6 +110,9 @@ sleep("200ms" | 200)            // signal-aware
 --quiet, -q            Suppress per-request output
 --out <path>           Append NDJSON samples to path
 --env KEY=VAL          Set workflow env var (repeatable)
+--env-file <path>      Load env vars from a file (repeatable; later wins)
+--no-env-file          Skip auto-loading ./.env
+--require-env <path>   Fail-fast if any key from <path> is unset/empty
 --cookies <dir>        Persist cookies as <dir>/vu-N.json
 --har <dir>            Record HAR as <dir>/vu-N.har
 --har-replay <path>    Replay responses from a recorded HAR (file or dir)
@@ -156,6 +159,81 @@ const r = await request.GET(`${env.API}/public`, { signal, cookies: false })
 ```
 
 The jar implements RFC 6265 (Domain/Path/Secure/HttpOnly/Expires/Max-Age). It deliberately does not handle public-suffix-list (PSL) restrictions or third-party cookie blocking — those are browser concerns.
+
+## Environment files
+
+`./.env` is auto-loaded from your current directory if present. Pass values to your workflow via the frozen `env` import:
+
+```js
+import { env } from "jolly-http"
+const res = await request.GET(`${env.API_BASE}/users`, {
+  headers: { authorization: `Bearer ${env.API_TOKEN}` },
+  signal,
+})
+```
+
+### Precedence (highest wins)
+
+```
+--env KEY=VAL  >  process.env  >  --env-file files (later > earlier)  >  auto-loaded ./.env
+```
+
+So a value in `./.env` is the project default, your shell's exported value overrides it, and a `--env` flag wins everything. Same as dotenv, Next.js, Vite, every modern framework.
+
+### Multi-file & explicit loading
+
+```sh
+jolly-http run flow.mjs --env-file .env.staging              # one file, no auto-load
+jolly-http run flow.mjs --env-file .env --env-file .env.local # later overrides earlier
+jolly-http run flow.mjs --no-env-file                        # skip ./.env entirely
+```
+
+Explicit `--env-file` disables auto-loading `./.env` (otherwise users would get surprised by both files merging).
+
+### Validation with `--require-env`
+
+Pair a committed `.env.example` (placeholder values, in git) with a gitignored `.env`:
+
+```sh
+# .env.example (committed)
+API_BASE=
+API_TOKEN=
+
+# .env (gitignored)
+API_BASE=https://api.example.com
+API_TOKEN=tok-xyz
+```
+
+Run with both flags:
+
+```sh
+jolly-http run flow.mjs --env-file .env --require-env .env.example
+```
+
+If any key listed in `.env.example` is unset or empty after the merge, the run fails fast *before* the workflow's first request:
+
+```
+missing required env vars from .env.example:
+  - API_TOKEN
+set them in .env, export them, or pass --env KEY=VAL
+```
+
+### Format
+
+Standard dotenv dialect:
+
+```
+# Comment
+KEY=value
+QUOTED="value with spaces"
+SINGLE='no $interpolation here'
+INTERPOLATED=${KEY}/path
+MULTILINE="line1
+line2"
+export FOO=bar     # bash-compat prefix; "export " is stripped
+```
+
+`${VAR}` interpolation only resolves against keys defined earlier *in the same file*. Bare `$VAR` is treated as literal text — no surprise eating of `$1`, `$@`, or currency strings.
 
 ## Watch mode
 

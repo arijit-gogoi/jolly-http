@@ -158,6 +158,115 @@ export default async function (vu, signal) {
     expect((replayResult.value as { fromReplay: boolean }).fromReplay).toBe(true)
   })
 
+  it("env-file: explicit --env-file loads vars into env", async () => {
+    const path = writeWorkflow(
+      "envflow.mjs",
+      `import { env } from "jolly-http"
+export default async function () { return { x: env.X, y: env.Y } }`,
+    )
+    const envFile = join(tmp, "envflow.env")
+    writeFileSync(envFile, "X=from-file\nY=other", "utf8")
+    const result = await runWorkflow({ workflowPath: path, envFiles: [envFile] })
+    expect(result.value).toEqual({ x: "from-file", y: "other" })
+  })
+
+  it("env-file: process.env overrides .env file", async () => {
+    process.env.__JOLLY_OVR_TEST__ = "from-process"
+    const path = writeWorkflow(
+      "ovrflow.mjs",
+      `import { env } from "jolly-http"
+export default async function () { return env.__JOLLY_OVR_TEST__ }`,
+    )
+    const envFile = join(tmp, "ovrflow.env")
+    writeFileSync(envFile, "__JOLLY_OVR_TEST__=from-file", "utf8")
+    const result = await runWorkflow({ workflowPath: path, envFiles: [envFile] })
+    expect(result.value).toBe("from-process")
+    delete process.env.__JOLLY_OVR_TEST__
+  })
+
+  it("env-file: --env flag wins over both", async () => {
+    const path = writeWorkflow(
+      "flagflow.mjs",
+      `import { env } from "jolly-http"
+export default async function () { return env.PRECEDENCE }`,
+    )
+    const envFile = join(tmp, "flagflow.env")
+    writeFileSync(envFile, "PRECEDENCE=from-file", "utf8")
+    const result = await runWorkflow({
+      workflowPath: path,
+      envFiles: [envFile],
+      env: { PRECEDENCE: "from-flag" },
+    })
+    expect(result.value).toBe("from-flag")
+  })
+
+  it("env-file: multiple files, later overrides earlier", async () => {
+    const path = writeWorkflow(
+      "multienv.mjs",
+      `import { env } from "jolly-http"
+export default async function () { return env.MULTI_KEY }`,
+    )
+    const f1 = join(tmp, "m1.env")
+    const f2 = join(tmp, "m2.env")
+    writeFileSync(f1, "MULTI_KEY=first", "utf8")
+    writeFileSync(f2, "MULTI_KEY=second", "utf8")
+    const result = await runWorkflow({ workflowPath: path, envFiles: [f1, f2] })
+    expect(result.value).toBe("second")
+  })
+
+  it("env-file: missing explicit file → result ok=false", async () => {
+    const path = writeWorkflow("nfile.mjs", `export default async function () {}`)
+    const result = await runWorkflow({ workflowPath: path, envFiles: ["/nonexistent/.env"] })
+    expect(result.ok).toBe(false)
+    expect((result.error as Error).message).toMatch(/not found/)
+  })
+
+  it("require-env: passes when all keys are set", async () => {
+    const path = writeWorkflow(
+      "reqok.mjs",
+      `import { env } from "jolly-http"
+export default async function () { return { a: env.A, b: env.B } }`,
+    )
+    const envFile = join(tmp, "reqok.env")
+    const example = join(tmp, "reqok.example")
+    writeFileSync(envFile, "A=1\nB=2", "utf8")
+    writeFileSync(example, "A=\nB=", "utf8")
+    const result = await runWorkflow({
+      workflowPath: path,
+      envFiles: [envFile],
+      requireEnvPath: example,
+    })
+    expect(result.ok).toBe(true)
+    expect(result.value).toEqual({ a: "1", b: "2" })
+  })
+
+  it("require-env: lists all missing keys at once", async () => {
+    const path = writeWorkflow("reqfail.mjs", `export default async function () {}`)
+    const example = join(tmp, "reqfail.example")
+    writeFileSync(example, "MISSING_A=\nMISSING_B=\nMISSING_C=", "utf8")
+    const result = await runWorkflow({ workflowPath: path, requireEnvPath: example })
+    expect(result.ok).toBe(false)
+    const msg = (result.error as Error).message
+    expect(msg).toContain("MISSING_A")
+    expect(msg).toContain("MISSING_B")
+    expect(msg).toContain("MISSING_C")
+  })
+
+  it("require-env: empty value KEY= counts as missing", async () => {
+    const path = writeWorkflow("emptyval.mjs", `export default async function () {}`)
+    const envFile = join(tmp, "emptyval.env")
+    const example = join(tmp, "emptyval.example")
+    writeFileSync(envFile, "X=", "utf8")
+    writeFileSync(example, "X=", "utf8")
+    const result = await runWorkflow({
+      workflowPath: path,
+      envFiles: [envFile],
+      requireEnvPath: example,
+    })
+    expect(result.ok).toBe(false)
+    expect((result.error as Error).message).toContain("X")
+  })
+
   it("HAR replay: miss throws HarReplayMissError", async () => {
     const harDir = join(tmp, "har-miss")
     rmSync(harDir, { recursive: true, force: true })

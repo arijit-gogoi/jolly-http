@@ -141,6 +141,26 @@ describe("parseCli", () => {
   it("--har + --har-replay together → CliError", () => {
     expect(() => parseCli(["run", "f.mjs", "--har", "./out", "--har-replay", "./in"])).toThrow(/cannot be combined/)
   })
+
+  it("--env-file repeatable, order preserved", () => {
+    const a = parseCli(["run", "f.mjs", "--env-file", ".env", "--env-file", ".env.local"])
+    expect(a.envFiles).toEqual([".env", ".env.local"])
+  })
+
+  it("--no-env-file boolean", () => {
+    const a = parseCli(["run", "f.mjs", "--no-env-file"])
+    expect(a.noEnvFile).toBe(true)
+  })
+
+  it("--require-env <path>", () => {
+    const a = parseCli(["run", "f.mjs", "--require-env", ".env.example"])
+    expect(a.requireEnvPath).toBe(".env.example")
+  })
+
+  it("env-file flags also valid in adhoc", () => {
+    const a = parseCli(["GET", "http://x/", "--env-file", ".env"])
+    expect(a.envFiles).toEqual([".env"])
+  })
 })
 
 let server: Server

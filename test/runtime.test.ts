@@ -63,10 +63,34 @@ describe("env", () => {
 })
 
 describe("buildEnv", () => {
-  it("produces a frozen merge", () => {
-    const e = buildEnv({ FOO: "override" })
+  it("produces a frozen merge with flag overrides only", () => {
+    const e = buildEnv([], { FOO: "override" })
     expect(Object.isFrozen(e)).toBe(true)
     expect(e.FOO).toBe("override")
+  })
+
+  it("layers: dotenv < process.env < flags", () => {
+    process.env.__JOLLY_LAYER_TEST__ = "from-process"
+    const e = buildEnv(
+      [{ __JOLLY_LAYER_TEST__: "from-dotenv" }],
+      { ANOTHER: "flag-only" },
+    )
+    // process.env wins over dotenv layer
+    expect(e.__JOLLY_LAYER_TEST__).toBe("from-process")
+    expect(e.ANOTHER).toBe("flag-only")
+    delete process.env.__JOLLY_LAYER_TEST__
+  })
+
+  it("flag overrides win over process.env", () => {
+    process.env.__JOLLY_FLAG_TEST__ = "from-process"
+    const e = buildEnv([], { __JOLLY_FLAG_TEST__: "from-flag" })
+    expect(e.__JOLLY_FLAG_TEST__).toBe("from-flag")
+    delete process.env.__JOLLY_FLAG_TEST__
+  })
+
+  it("multiple dotenv layers — later wins", () => {
+    const e = buildEnv([{ X: "1" }, { X: "2" }, { X: "3" }], {})
+    expect(e.X).toBe("3")
   })
 })
 

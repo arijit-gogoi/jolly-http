@@ -1,11 +1,60 @@
 import { pathToFileURL } from "node:url"
 import { resolve } from "node:path"
+import { existsSync, readFileSync } from "node:fs"
 import { scope, isStructuralCancellation } from "jolly-coop"
 import { buildEnv, withRuntime, type RuntimeContext } from "./runtime.js"
 import { createSampleSink } from "./output.js"
 import { loadCookieJar, saveCookieJar, cookieJarPath } from "./cookies.js"
 import { createHarRecorder, saveHar, harPath, loadHarReplay } from "./har.js"
+import { loadEnvFile, readEnvKeys } from "./dotenv.js"
 import type { RunOptions, RunResult, WorkflowFn } from "./types.js"
+
+/**
+ * Resolve env file paths into a list of parsed `.env` records, in order
+ * (earlier loses to later when merged by buildEnv).
+ *
+ * Behavior:
+ *  - If `envFiles` is set, use it (do NOT auto-load ./.env — explicit wins).
+ *    Any explicit file that doesn't exist throws.
+ *  - Else, if `noEnvFile` is false (default), try ./.env. Missing → silent.
+ *  - Else, no layers.
+ */
+export function resolveEnvLayers(opts: {
+  envFiles?: string[]
+  noEnvFile?: boolean
+}): Record<string, string>[] {
+  if (opts.envFiles && opts.envFiles.length > 0) {
+    return opts.envFiles.map(p => loadEnvFile(p, { throwOnMissing: true }))
+  }
+  if (opts.noEnvFile) return []
+  const auto = resolve(process.cwd(), ".env")
+  if (existsSync(auto)) return [loadEnvFile(auto)]
+  return []
+}
+
+/**
+ * After env layers are merged, validate every key in `requireEnvPath` is set
+ * to a non-empty string. Fails fast with all missing keys at once (not first-fail).
+ */
+export function validateRequiredEnv(
+  merged: Readonly<Record<string, string>>,
+  requireEnvPath: string,
+): void {
+  if (!existsSync(requireEnvPath)) {
+    throw new Error(`--require-env file not found: ${requireEnvPath}`)
+  }
+  const keys = readEnvKeys(readFileSync(requireEnvPath, "utf8"))
+  const missing: string[] = []
+  for (const k of keys) {
+    if (merged[k] === undefined || merged[k] === "") missing.push(k)
+  }
+  if (missing.length > 0) {
+    const list = missing.map(k => `  - ${k}`).join("\n")
+    throw new Error(
+      `missing required env vars from ${requireEnvPath}:\n${list}\nset them in .env, export them, or pass --env KEY=VAL`,
+    )
+  }
+}
 
 export async function loadWorkflow(path: string): Promise<WorkflowFn> {
   const abs = resolve(path)
@@ -40,7 +89,20 @@ export async function runWorkflow(opts: RunOptions): Promise<RunResult> {
 }
 
 export async function runWorkflowFn(fn: WorkflowFn, opts: RunOptions): Promise<RunResult> {
-  const env = buildEnv(opts.env)
+  let layers: Record<string, string>[]
+  try {
+    layers = resolveEnvLayers(opts)
+  } catch (err) {
+    return { ok: false, error: err, samples: 0 }
+  }
+  const env = buildEnv(layers, opts.env)
+  if (opts.requireEnvPath) {
+    try {
+      validateRequiredEnv(env, opts.requireEnvPath)
+    } catch (err) {
+      return { ok: false, error: err, samples: 0 }
+    }
+  }
   let samples = 0
 
   const result = await scope({ signal: opts.signal }, async s => {
@@ -59,7 +121,7 @@ export async function runWorkflowFn(fn: WorkflowFn, opts: RunOptions): Promise<R
         })
       : undefined
     const harRecorder = opts.harDir
-      ? await s.resource(createHarRecorder("0.2.0"), r => {
+      ? await s.resource(createHarRecorder("0.3.0"), r => {
           saveHar(r, harPath(opts.harDir!, 0))
         })
       : undefined

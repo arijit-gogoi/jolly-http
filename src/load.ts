@@ -1,7 +1,7 @@
 import { scope, sleep, yieldNow, isStructuralCancellation } from "jolly-coop"
 import { buildEnv, withRuntime, type RuntimeContext } from "./runtime.js"
 import { createSampleSink } from "./output.js"
-import { loadWorkflow } from "./run.js"
+import { loadWorkflow, resolveEnvLayers, validateRequiredEnv } from "./run.js"
 import { createCookieJar, loadCookieJar, saveCookieJar, cookieJarPath, type CookieJar } from "./cookies.js"
 import { createHarRecorder, saveHar, harPath, loadHarReplay, type HarRecorder, type HarReplayer } from "./har.js"
 import type { LoadOptions, Sample, SampleSink, VuContext, WorkflowFn } from "./types.js"
@@ -47,7 +47,9 @@ export interface LoadResult {
  */
 export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
   const fn = await loadWorkflow(opts.workflowPath)
-  const env = buildEnv(opts.env)
+  const layers = resolveEnvLayers(opts)
+  const env = buildEnv(layers, opts.env)
+  if (opts.requireEnvPath) validateRequiredEnv(env, opts.requireEnvPath)
 
   const stats = new Stats(opts.warmupMs ?? 0)
   const tZero = performance.now()
@@ -88,7 +90,7 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
               })
             : undefined
           const harRecorder = opts.harDir
-            ? await pool.resource(createHarRecorder("0.2.0"), r => {
+            ? await pool.resource(createHarRecorder("0.3.0"), r => {
                 saveHar(r, harPath(opts.harDir!, i))
               })
             : undefined

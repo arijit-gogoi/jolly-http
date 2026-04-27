@@ -1,6 +1,7 @@
-export const VERSION = "0.2.0"
+export const VERSION = "0.3.0"
 
 export { request, performRequest } from "./request.js"
+export { parseDotenv, readEnvKeys, loadEnvFile } from "./dotenv.js"
 export { assert, AssertionError, env, sleep } from "./runtime.js"
 export { runWorkflow, runWorkflowFn, loadWorkflow } from "./run.js"
 export { runAdhoc } from "./adhoc.js"

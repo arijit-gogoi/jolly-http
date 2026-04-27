@@ -68,12 +68,25 @@ export function sleep(duration: number | string): Promise<void> {
 
 let envCache: Readonly<Record<string, string>> | null = null
 
-export function buildEnv(overrides: Record<string, string> = {}): Readonly<Record<string, string>> {
+/**
+ * Build the workflow's frozen env, layering sources by precedence (lowest → highest):
+ *   1. dotenvLayers (in array order — first file is lowest, last is highest)
+ *   2. process.env
+ *   3. flagOverrides (--env KEY=VAL)
+ *
+ * Equivalent to dotenv/Next.js/Vite: file defaults lose to shell exports, which
+ * lose to explicit per-run flags.
+ */
+export function buildEnv(
+  dotenvLayers: Record<string, string>[] = [],
+  flagOverrides: Record<string, string> = {},
+): Readonly<Record<string, string>> {
   const base: Record<string, string> = {}
+  for (const layer of dotenvLayers) Object.assign(base, layer)
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === "string") base[k] = v
   }
-  Object.assign(base, overrides)
+  Object.assign(base, flagOverrides)
   return Object.freeze(base)
 }
 

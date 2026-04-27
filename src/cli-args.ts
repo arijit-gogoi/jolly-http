@@ -27,6 +27,9 @@ export interface CliArgs {
   cookiesDir?: string
   harDir?: string
   harReplayPath?: string
+  envFiles: string[]
+  noEnvFile: boolean
+  requireEnvPath?: string
 }
 
 export class CliError extends Error {
@@ -64,6 +67,9 @@ export function parseCli(argv: string[]): CliArgs {
         cookies: { type: "string" },
         har: { type: "string" },
         "har-replay": { type: "string" },
+        "env-file": { type: "string", multiple: true },
+        "no-env-file": { type: "boolean" },
+        "require-env": { type: "string" },
       },
     })
   } catch (err) {
@@ -107,6 +113,14 @@ export function parseCli(argv: string[]): CliArgs {
   if (harDir !== undefined && harReplayPath !== undefined) {
     throw new CliError("--har and --har-replay cannot be combined (chained record-from-replay is unsupported)", 2)
   }
+  const envFilesRaw = values["env-file"]
+  const envFiles = Array.isArray(envFilesRaw)
+    ? (envFilesRaw as string[])
+    : typeof envFilesRaw === "string"
+      ? [envFilesRaw]
+      : []
+  const noEnvFile = values["no-env-file"] === true
+  const requireEnvPath = strOrUndef(values["require-env"])
 
   if (positionals.length === 0) throw new CliError("no arguments — see --help", 2)
   const first = positionals[0]
@@ -132,6 +146,9 @@ export function parseCli(argv: string[]): CliArgs {
       cookiesDir,
       harDir,
       harReplayPath,
+      envFiles,
+      noEnvFile,
+      requireEnvPath,
     })
   }
   if (watch) throw new CliError("--watch only valid with `run` subcommand", 2)
@@ -159,6 +176,9 @@ export function parseCli(argv: string[]): CliArgs {
       cookiesDir,
       harDir,
       harReplayPath,
+      envFiles,
+      noEnvFile,
+      requireEnvPath,
     })
   }
 
@@ -194,6 +214,9 @@ function baseArgs(partial: Partial<CliArgs> & { mode: CliArgs["mode"] }): CliArg
     cookiesDir: partial.cookiesDir,
     harDir: partial.harDir,
     harReplayPath: partial.harReplayPath,
+    envFiles: partial.envFiles ?? [],
+    noEnvFile: partial.noEnvFile ?? false,
+    requireEnvPath: partial.requireEnvPath,
   }
 }
 
@@ -245,6 +268,11 @@ OPTIONS
                             file (*.har) → shared across VUs;
                             directory     → per-VU (<dir>/vu-N.har).
                             Strict match: method + url + body. Misses throw.
+  --env-file <path>         Load env vars from a file (repeatable; later wins).
+                            If unset, ./.env is auto-loaded (if it exists).
+  --no-env-file             Skip auto-loading ./.env.
+  --require-env <path>      Fail-fast if any key from <path> is unset/empty
+                            in the merged env. Designed for .env.example.
 
 LOAD MODE
   -c, --concurrency <n>     Virtual users (default 1)
@@ -267,4 +295,13 @@ EXAMPLES
   jolly-http run examples/auth.mjs --watch --cookies ./jar
   jolly-http run examples/auth.mjs --har ./har-out
   jolly-http run examples/auth.mjs --har-replay ./har-out
+  jolly-http run examples/auth.mjs --env-file .env --require-env .env.example
+
+ENVIRONMENT
+  Precedence (highest wins):
+    --env KEY=VAL  >  process.env  >  --env-file files (later > earlier)
+                                    >  auto-loaded ./.env
+  --env-file is repeatable; later files override earlier.
+  Explicit --env-file disables ./.env auto-loading.
+  --no-env-file disables auto-loading even when no --env-file is given.
 `

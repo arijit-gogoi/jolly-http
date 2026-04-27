@@ -53,6 +53,12 @@ export interface RunOptions {
   cookiesDir?: string
   harDir?: string
   harReplayPath?: string
+  /** Explicit --env-file paths, processed in order (later overrides earlier). */
+  envFiles?: string[]
+  /** Skip auto-loading ./.env (when no envFiles are given). */
+  noEnvFile?: boolean
+  /** Path to a .env.example-shaped file; every key in it must be set in the merged env. */
+  requireEnvPath?: string
 }
 
 export interface LoadOptions extends RunOptions {
@@ -85,6 +91,9 @@ export interface AdhocOptions {
   cookiesDir?: string
   harDir?: string
   harReplayPath?: string
+  envFiles?: string[]
+  noEnvFile?: boolean
+  requireEnvPath?: string
 }
 
 export interface RequestInit {
