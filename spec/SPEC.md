@@ -36,7 +36,7 @@ jolly-http run flow.mjs --out responses.ndjson        # record per-request sampl
 
 - `--header, -H <k:v>` (repeatable)
 - `--timeout <dur>` — per-request, applies to all requests in workflow
-- `--insecure, -k` — skip TLS validation (v0.4; parsed but not yet wired)
+- `--insecure, -k` — currently a no-op. To skip TLS validation, use the runtime's built-in mechanism: `NODE_TLS_REJECT_UNAUTHORIZED=0` (Node), `bun --tls-no-verify` (Bun), `deno run --unsafely-ignore-certificate-errors` (Deno). Cross-runtime, zero-dep, properly scoped to the CLI process. The flag may be removed in a future major version.
 - `--user-agent <str>` — default `jolly-http/${VERSION}`
 - `--quiet, -q` — suppress per-request output
 - `--out <path>` — NDJSON sample file
@@ -190,10 +190,11 @@ Features explicitly NOT part of the current release. Listed here so the boundary
 
 **Deferred to v0.4 (planned):**
 
-- `--insecure` wiring — flag is parsed but inert pending undici-dispatcher integration
 - Cookie domain/public-suffix list (PSL) handling
 - HAR replay matching modes beyond strict (loose, sequential, permissive miss)
 - Mode-based env file chains (`.env.production`, `.env.production.local`)
+
+**`--insecure` wiring — deliberately not implemented.** Use the runtime's built-in mechanism: `NODE_TLS_REJECT_UNAUTHORIZED=0` (Node), `bun --tls-no-verify` (Bun), `deno run --unsafely-ignore-certificate-errors` (Deno). Adding a CLI flag would either require a Node-specific dep (undici dispatcher; silent no-op on Bun/Deno) or wrap the env var (weak abstraction). Runtime flags are cross-portable, scoped to the CLI process, and battle-tested. The currently-parsed `--insecure` flag is a no-op and may be removed in a future major version.
 
 **Deferred indefinitely:**
 

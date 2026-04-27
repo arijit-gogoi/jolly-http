@@ -257,7 +257,9 @@ OPTIONS
   --json <str>              Set body to this JSON string (overrides shorthand)
   --form                    Use form encoding instead of JSON
   --timeout <dur>           Per-request timeout (e.g. 5s, 500ms)
-  --insecure, -k            [v0.4] Skip TLS validation (not yet wired)
+  --insecure, -k            (no-op; use NODE_TLS_REJECT_UNAUTHORIZED=0 for Node,
+                            bun --tls-no-verify, or
+                            deno run --unsafely-ignore-certificate-errors)
   --user-agent <str>        Override User-Agent
   --quiet, -q               Suppress per-request output
   --out <path>              Write NDJSON samples to path

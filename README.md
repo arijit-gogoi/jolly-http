@@ -105,7 +105,7 @@ sleep("200ms" | 200)            // signal-aware
 --json <str>           Body as JSON string (overrides shorthand)
 --form                 Send x-www-form-urlencoded
 --timeout <dur>        Per-request timeout ("500ms", "30s", "2m")
---insecure, -k         [v0.4] Skip TLS validation (flag parsed, not yet wired)
+--insecure, -k         (parsed; see "Self-signed certs" below for the working alternative)
 --user-agent <str>     Override User-Agent
 --quiet, -q            Suppress per-request output
 --out <path>           Append NDJSON samples to path
@@ -291,6 +291,27 @@ When a request has no matching entry, `request.GET` throws `HarReplayMissError` 
 - Form bodies (`URLSearchParams`) match by exact string, so field order matters between record and replay. Use `json:` for canonical ordering.
 - Request headers are not part of the match (so cookie drift between record and replay is tolerated).
 - Multipart bodies have non-deterministic boundaries and aren't reliably replayable.
+
+## Self-signed certs / internal CAs
+
+For dev servers using self-signed certificates, internal CAs not in the system trust store, or any TLS validation skip — use your runtime's built-in flag rather than a CLI option. They're battle-tested, portable across runtimes, and don't add to jolly-http's dependency footprint:
+
+```sh
+# Node
+NODE_TLS_REJECT_UNAUTHORIZED=0 jolly-http run flow.mjs
+
+# Bun
+bun --tls-no-verify run jolly-http run flow.mjs
+
+# Deno
+deno run --unsafely-ignore-certificate-errors jolly-http run flow.mjs
+```
+
+These apply to the entire process, which is the right scope for a CLI that runs once and exits. Node will print a warning to stderr — that's intentional UX: when you ask for insecure, you should see that you got it.
+
+The proper long-term fix for internal CAs is to add the corporate certificate to your system's trust store (then no flag is needed). The runtime flags above are an escape hatch for cases where that's not feasible (CI, ephemeral environments, dev iteration).
+
+> The `--insecure, -k` CLI flag is currently a no-op; the runtime mechanisms above are the supported way to skip TLS validation. The flag may be removed in a future major version.
 
 ## Why `.mjs`?
 
