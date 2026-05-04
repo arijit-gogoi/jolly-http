@@ -178,7 +178,7 @@ export async function runWorkflowFn(
         )
       : createCookieJar()
     const harRecorder = opts.harDir
-      ? await s.resource(createHarRecorder("0.3.1"), r => {
+      ? await s.resource(createHarRecorder("0.4.0"), r => {
           saveHar(r, harPath(opts.harDir!, 0))
         })
       : undefined

@@ -199,11 +199,22 @@ The internal scope tree, resource discipline, and runtime-context plumbing is im
 
 Features explicitly NOT part of the current release. Listed here so the boundary is visible, not hidden:
 
-**Deferred to v0.4 (planned):**
+**Deferred to v0.5+ (planned):**
 
 - Cookie domain/public-suffix list (PSL) handling
 - HAR replay matching modes beyond strict (loose, sequential, permissive miss)
 - Mode-based env file chains (`.env.production`, `.env.production.local`)
+- Companion packages for side-channel state mutation (DB / Redis / S3)
+
+**Deliberately rejected (no plans to ship):**
+
+- `request.use(middleware)` — wrapper modules in userland are the pattern; permanent surface (ordering, async, ctx shape, retry semantics) we'd regret.
+- `expect()` parallel API — `assert` is the frozen surface; `import { expect } from "vitest"` works in `.mjs`/`.ts` for users who want jest-style matchers.
+- `toMatchSnapshot()` — no demonstrated user pain. Userland helper is ~7 lines.
+- Default `redirect: "manual"` for POST — too breaking; documented in Troubleshooting instead.
+- `pino`-style structured logger — `process.stderr.write(JSON.stringify(...) + "\n")` is the recommended pattern for trace points in load mode.
+- CSRF helpers — too domain-specific; userland 5-liner.
+- JSON-schema response assertion — `import { z } from "zod"` works in `.mjs`/`.ts`.
 
 **`--insecure` wiring — deliberately not implemented.** Use the runtime's built-in mechanism: `NODE_TLS_REJECT_UNAUTHORIZED=0` (Node), `bun --tls-no-verify` (Bun), `deno run --unsafely-ignore-certificate-errors` (Deno). Adding a CLI flag would either require a Node-specific dep (undici dispatcher; silent no-op on Bun/Deno) or wrap the env var (weak abstraction). Runtime flags are cross-portable, scoped to the CLI process, and battle-tested. The currently-parsed `--insecure` flag is a no-op and may be removed in a future major version.
 
@@ -222,6 +233,8 @@ Features explicitly NOT part of the current release. Listed here so the boundary
 **Shipped in v0.2:** `--watch`, cookie jar with `--cookies <dir>`, HAR recording with `--har <dir>`, HAR replay with `--har-replay <path>`.
 
 **Shipped in v0.3:** `.env` file loading with `--env-file <path>` (repeatable, with auto-load of `./.env`), `--no-env-file` opt-out, `--require-env <path>` validation against a `.env.example` schema.
+
+**Shipped in v0.4:** breaking change — `--cookies <dir>` is now fresh-each-run (audit trail), `--cookies-resume <dir>` is opt-in cross-run continuity. `prologue` / `epilogue` named-export hooks for once-per-run setup/teardown (epilogue runs even when prologue throws; matches jest beforeAll/afterAll). `AssertionError` auto-includes last-request URL/status/headers/full body. `fetch failed` cause-chain classification — system errno codes and undici-internal names surface in NDJSON `error` field. `Sample.phase?` field for prologue/epilogue traffic. `prologue`/`epilogue`-emitted samples use sentinel `iteration: -1`/`-2`. TypeScript `.ts` workflows on runtimes that strip types natively (Bun, Deno, Node ≥ 23, Node 22.6+ with flag). Better runtime-outside-workflow error message.
 
 ### Environment file precedence
 

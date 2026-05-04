@@ -380,6 +380,41 @@ export default async function (vu, signal) {
     expect((r2.value as { status: number }).status).toBe(401)
   })
 
+  it("loads a .ts workflow on runtimes that strip types natively", async () => {
+    // Node ≥22.6 with --experimental-strip-types, Node ≥23 default-on, and
+    // both Bun and Deno strip TS natively. We test only on the runtime
+    // running the suite — if it can't strip types, skip with a clear note.
+    const tsPath = join(tmp, "ts-flow.ts")
+    writeFileSync(
+      tsPath,
+      `import { request, type VuContext } from "jolly-http"
+interface User { id: number; name: string }
+export default async function (vu: VuContext, signal: AbortSignal) {
+  const r = await request.GET("${baseUrl}/hello", { signal })
+  const u: User = { id: vu.id, name: "x" }
+  return { uid: u.id, status: r.status }
+}
+`,
+      "utf8",
+    )
+    try {
+      const result = await runWorkflow({ workflowPath: tsPath })
+      expect(result.ok).toBe(true)
+      expect(result.value).toEqual({ uid: 0, status: 200 })
+    } catch (err) {
+      const msg = (err as Error)?.message ?? String(err)
+      // ESM loader rejects unknown extensions on older Node versions.
+      // Mark as skipped-via-noop rather than fail — the same npm package
+      // works on supported runtimes; this assertion just isn't useful there.
+      if (/Unknown file extension|TypeScript syntax/.test(msg)) {
+        // eslint-disable-next-line no-console
+        console.warn(`skipping .ts workflow test on this runtime: ${msg}`)
+        return
+      }
+      throw err
+    }
+  })
+
   describe("prologue / epilogue hooks", () => {
     it("runs prologue once before iteration; epilogue once after", async () => {
       const path = writeWorkflow(

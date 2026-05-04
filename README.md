@@ -85,6 +85,30 @@ jolly-http run flow.mjs -c 50 -d 30s --out samples.ndjson
 
 Same file. No rewriting, no separate load-test DSL. SIGINT propagates through the in-process load runner; per-request samples go to NDJSON.
 
+### TypeScript directly
+
+A workflow file can be `.ts` instead of `.mjs` on any runtime that strips types natively:
+
+```sh
+jolly-http run flow.ts                                       # Bun, Deno, Node ≥ 23
+node --experimental-strip-types $(which jolly-http) run flow.ts   # Node 22.6+
+```
+
+```ts
+// flow.ts
+import { request, assert, env, type VuContext } from "jolly-http"
+
+export default async function (vu: VuContext, signal: AbortSignal) {
+  const r = await request.GET(`${env.API}/me`, { signal })
+  assert(r.status === 200)
+  return await r.json()
+}
+```
+
+Type imports work the same as in any `.ts` module — `VuContext`, `RequestInit`, `Sample`, `HookFn` etc. are all exported from `"jolly-http"`. `request.GET` returns `Promise<Response>`, `assert` is typed `asserts cond` so it narrows for downstream code. No transpile step, no build dep — your runtime does it.
+
+If your runtime can't strip types and the npm package's transpile-on-the-fly options aren't an option, use `.mjs`.
+
 ## Workflow API (frozen — permanent public surface)
 
 ```ts
@@ -354,6 +378,85 @@ deno run --unsafely-ignore-certificate-errors jolly-http run flow.mjs  # Deno
 Node prints a stderr warning — that's intentional UX. The proper fix for internal CAs is your system trust store; the runtime flags are an escape hatch for CI / dev iteration.
 
 > The `--insecure, -k` CLI flag is a no-op and may be removed in a future major.
+
+## Troubleshooting
+
+### `TypeError: fetch failed` with no detail
+
+undici (Node's fetch) wraps every network failure as `fetch failed`. jolly-http walks `.cause` and surfaces a structured error name in the NDJSON `error` field — `ECONNREFUSED`, `ENOTFOUND`, `ETIMEDOUT`, `ECONNRESET`, etc. for system errno; `UND_ERR_BODY_TIMEOUT` etc. for undici-internal; `AbortError` for cancellation. The thrown error retains its full `.cause` chain — workflows that catch can walk it.
+
+```js
+try {
+  await request.GET(url, { signal })
+} catch (err) {
+  console.error(err.cause?.code)  // e.g. "ECONNREFUSED"
+}
+```
+
+### POST returned no error but my assertion on `.status` fails
+
+Default redirect mode is `"follow"`. A `POST` that gets a `303 See Other` (the standard pattern in server-rendered apps — htmx, Rails, Phoenix, Django) silently redirects to the GET, and your code sees the GET's status, not the POST's `303`. To assert on the actual `303`:
+
+```js
+const signup = await request.POST(`${env.API}/signup`, {
+  json: { email },
+  redirect: "manual",   // ← critical for POST→303 patterns
+  signal,
+})
+assert(signup.status === 303, `expected 303, got ${signup.status}`)
+```
+
+### `jolly-http: request/assert/env/sleep can only be used from inside a workflow function`
+
+`request.*`, `assert`, `env`, `sleep` discover their state via an async-local runtime context. They work *only* when called from inside the workflow's `default` export, `prologue`, or `epilogue`. Helper modules are fine — but the helper has to be **called** from inside one of those, not run at module-import time.
+
+Wrong (call at import time):
+```js
+// helper.mjs
+import { request } from "jolly-http"
+await request.GET("/")   // ← throws on import
+```
+
+Right (call from inside workflow):
+```js
+// helper.mjs
+import { request } from "jolly-http"
+export const fetchUser = (id) => request.GET(`/users/${id}`)
+
+// flow.mjs
+import { fetchUser } from "./helper.mjs"
+export default async function () {
+  await fetchUser(7)   // ← runs inside the workflow's runtime
+}
+```
+
+### Missing env var
+
+Use `--require-env <path>` against a committed `.env.example`:
+
+```sh
+jolly-http run flow.mjs --env-file .env --require-env .env.example
+```
+
+Fails fast before the workflow's first request, listing every missing key.
+
+### Cookies surviving across runs
+
+In v0.4+, that only happens with `--cookies-resume <dir>` (opt-in cross-run continuity). The default `--cookies <dir>` is fresh-each-run — every invocation starts with an empty jar. See [Cookies](#cookies).
+
+### Structured logging in load mode
+
+`console.log` works, but in load mode (50+ VUs writing concurrently) lines garble. The recommended pattern:
+
+```js
+process.stderr.write(JSON.stringify({ vu: vu.id, event: "step1" }) + "\n")
+```
+
+Atomic-write per line, parseable with `jq`, survives concurrent VUs cleanly.
+
+### Assertion failure with no context
+
+In v0.4+, `AssertionError` automatically includes the most recent request's URL, status, headers, and full response body. If you're seeing just the message and no context, you're likely on an older version — upgrade.
 
 ## Why `.mjs`?
 

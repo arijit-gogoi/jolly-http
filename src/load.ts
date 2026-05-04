@@ -57,7 +57,7 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
   const deadline = Date.now() + opts.durationMs
   const completed = { n: 0 }
   const rateLimiter = opts.rps !== undefined ? new RateLimiter(opts.rps) : undefined
-  const userAgent = opts.userAgent ?? `jolly-http/0.2.0`
+  const userAgent = opts.userAgent ?? `jolly-http/0.4.0`
 
   let endedBy: EndedBy = "drained"
   let failure: unknown
@@ -142,7 +142,7 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
               )
             : createCookieJar()
           const harRecorder = opts.harDir
-            ? await pool.resource(createHarRecorder("0.3.1"), r => {
+            ? await pool.resource(createHarRecorder("0.4.0"), r => {
                 saveHar(r, harPath(opts.harDir!, i))
               })
             : undefined
