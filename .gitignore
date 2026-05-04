@@ -9,6 +9,7 @@ coverage/
 test/fixtures/run/
 test/fixtures/load/
 test/fixtures/integration/
+test/fixtures/smoke/tmp/
 
 # Local env files; never commit. .env.example is committed as the schema.
 .env
