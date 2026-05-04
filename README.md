@@ -4,39 +4,7 @@ Workflow-as-code HTTP tool built on [jolly-coop](https://github.com/arijit-gogoi
 
 Simplicity of httpie, speed of xh, plus a thing neither has: **the same `.mjs` file is your debug script, your test, and your load scenario.**
 
-## Install
-
-```sh
-npm install -g jolly-http
-```
-
-Requires Node.js ≥ 22. Also runs on Bun and Deno via the published npm package.
-
-## Three modes, one mental model
-
-### 1. Ad-hoc (httpie-shaped)
-
-```sh
-jolly-http GET https://api.github.com/users/arijit-gogoi
-jolly-http POST https://httpbin.org/post name=ari age:=30 Auth:tok
-jolly-http PUT https://api/users/1 --json '{"name":"ari"}'
-```
-
-Body shorthand:
-
-| Form              | Effect                                        |
-|-------------------|-----------------------------------------------|
-| `key=value`       | JSON string field                             |
-| `key:=value`      | JSON literal (number, bool, null, array, obj) |
-| `Header:value`    | Request header                                |
-| `key==value`      | Query parameter                               |
-| `key@path`        | File upload (form field)                      |
-
-### 2. Workflow file (sequential)
-
-```sh
-jolly-http run flow.mjs
-```
+## One file, three ways
 
 ```js
 // flow.mjs
@@ -57,18 +25,65 @@ export default async function (vu, signal) {
     signal,
   })
   assert(me.status === 200)
-
-  return { ok: true }
 }
 ```
 
-### 3. Same workflow, under load
+```sh
+# Debug it.
+jolly-http run flow.mjs
+
+# Record real responses for offline replay.
+jolly-http run flow.mjs --har ./fixtures
+
+# Load-test it.
+jolly-http run flow.mjs -c 50 -d 30s --out samples.ndjson
+```
+
+Same file. No rewriting, no separate load-test DSL, no second tool.
+
+## Install
+
+```sh
+npm install -g jolly-http
+```
+
+Requires Node.js ≥ 22. Also runs on Bun and Deno via the published npm package.
+
+## Modes
+
+### Ad-hoc (httpie-shaped)
+
+```sh
+jolly-http GET https://api.github.com/users/arijit-gogoi
+jolly-http POST https://httpbin.org/post name=ari age:=30 Auth:tok
+jolly-http PUT https://api/users/1 --json '{"name":"ari"}'
+```
+
+Body shorthand:
+
+| Form              | Effect                                        |
+|-------------------|-----------------------------------------------|
+| `key=value`       | JSON string field                             |
+| `key:=value`      | JSON literal (number, bool, null, array, obj) |
+| `Header:value`    | Request header                                |
+| `key==value`      | Query parameter                               |
+| `key@path`        | File upload (form field)                      |
+
+### Workflow file (sequential)
+
+The `flow.mjs` shown above. Run it with one VU, one iteration:
+
+```sh
+jolly-http run flow.mjs
+```
+
+### Under load
 
 ```sh
 jolly-http run flow.mjs -c 50 -d 30s --out samples.ndjson
 ```
 
-The same file. No rewriting, no separate load-test DSL. SIGINT propagates through the in-process load runner; per-request samples go to NDJSON.
+Same file. No rewriting, no separate load-test DSL. SIGINT propagates through the in-process load runner; per-request samples go to NDJSON.
 
 ## Workflow API (frozen — permanent public surface)
 
