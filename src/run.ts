@@ -116,13 +116,21 @@ export async function runWorkflowFn(fn: WorkflowFn, opts: RunOptions): Promise<R
     }
     // Single-run uses vu-0.* — same naming as load for tooling consistency.
     // The jar is always present so cookies flow within a workflow run
-    // (login → me-call works without --cookies). --cookies <dir> only adds
-    // disk persistence (load-from + save-to). In-memory jar = GC handles cleanup;
-    // persistent jar = scope resource so save fires on cancel/abort/done.
-    const cookieJar = opts.cookiesDir
-      ? await s.resource(loadCookieJar(cookieJarPath(opts.cookiesDir, 0)), j => {
-          saveCookieJar(j, cookieJarPath(opts.cookiesDir!, 0))
-        })
+    // (login → me-call works without any flag). v0.4 default semantics:
+    //   --cookies <dir>        : start fresh, save on exit (audit trail)
+    //   --cookies-resume <dir> : load from disk, save on exit (continuity)
+    //   neither                : in-memory only, discarded on exit
+    // Persistent jars register a scope resource so save fires on cancel/abort/done.
+    const persistDir = opts.cookiesDir ?? opts.cookiesResumeDir
+    const cookieJar = persistDir
+      ? await s.resource(
+          opts.cookiesResumeDir
+            ? loadCookieJar(cookieJarPath(opts.cookiesResumeDir, 0))
+            : createCookieJar(),
+          j => {
+            saveCookieJar(j, cookieJarPath(persistDir, 0))
+          },
+        )
       : createCookieJar()
     const harRecorder = opts.harDir
       ? await s.resource(createHarRecorder("0.3.1"), r => {

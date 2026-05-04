@@ -344,4 +344,67 @@ export default async function (vu, signal) {
     expect(err.method).toBe("GET")
     expect(err.url).toContain("/unknown")
   })
+
+  it("--cookies <dir> is fresh-each-run: second run does NOT inherit cookies", async () => {
+    const path = writeWorkflow(
+      "cookies-fresh.mjs",
+      `import { request, assert } from "jolly-http"
+export default async function (vu, signal) {
+  const echo = await request.GET("${baseUrl}/needs-cookie", { signal })
+  // No cookie sent → server returns 401. Returns the status so the test asserts on it.
+  return { status: echo.status }
+}`,
+    )
+    const seedPath = writeWorkflow(
+      "cookies-fresh-seed.mjs",
+      `import { request } from "jolly-http"
+export default async function (vu, signal) {
+  await request.GET("${baseUrl}/set-cookie", { signal })  // jar absorbs Set-Cookie
+}`,
+    )
+    const jarDir = join(tmp, "fresh-jar")
+    if (existsSync(jarDir)) rmSync(jarDir, { recursive: true, force: true })
+
+    // Run 1: set cookie. cookiesDir saves on exit.
+    const r1 = await runWorkflow({ workflowPath: seedPath, cookiesDir: jarDir })
+    expect(r1.ok).toBe(true)
+    // The jar file exists on disk from r1.
+    expect(existsSync(join(jarDir, "vu-0.json"))).toBe(true)
+
+    // Run 2: same cookiesDir. With v0.4 semantics the jar starts empty
+    // even though the dir has a previous jar on disk.
+    const r2 = await runWorkflow({ workflowPath: path, cookiesDir: jarDir })
+    expect(r2.ok).toBe(true)
+    expect((r2.value as { status: number }).status).toBe(401)
+  })
+
+  it("--cookies-resume <dir>: second run DOES inherit cookies from disk", async () => {
+    const path = writeWorkflow(
+      "cookies-resume.mjs",
+      `import { request, assert } from "jolly-http"
+export default async function (vu, signal) {
+  const echo = await request.GET("${baseUrl}/needs-cookie", { signal })
+  return { status: echo.status }
+}`,
+    )
+    const seedPath = writeWorkflow(
+      "cookies-resume-seed.mjs",
+      `import { request } from "jolly-http"
+export default async function (vu, signal) {
+  await request.GET("${baseUrl}/set-cookie", { signal })
+}`,
+    )
+    const jarDir = join(tmp, "resume-jar")
+    if (existsSync(jarDir)) rmSync(jarDir, { recursive: true, force: true })
+
+    // Run 1: seed and persist via the resume flag.
+    const r1 = await runWorkflow({ workflowPath: seedPath, cookiesResumeDir: jarDir })
+    expect(r1.ok).toBe(true)
+    expect(existsSync(join(jarDir, "vu-0.json"))).toBe(true)
+
+    // Run 2: same dir, same resume flag → jar loads on startup, cookie sent.
+    const r2 = await runWorkflow({ workflowPath: path, cookiesResumeDir: jarDir })
+    expect(r2.ok).toBe(true)
+    expect((r2.value as { status: number }).status).toBe(200)
+  })
 })

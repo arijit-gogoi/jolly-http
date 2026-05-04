@@ -121,6 +121,19 @@ describe("parseCli", () => {
   it("--cookies <dir>", () => {
     const a = parseCli(["run", "f.mjs", "--cookies", "./jar"])
     expect(a.cookiesDir).toBe("./jar")
+    expect(a.cookiesResumeDir).toBeUndefined()
+  })
+
+  it("--cookies-resume <dir>", () => {
+    const a = parseCli(["run", "f.mjs", "--cookies-resume", "./jar"])
+    expect(a.cookiesResumeDir).toBe("./jar")
+    expect(a.cookiesDir).toBeUndefined()
+  })
+
+  it("--cookies + --cookies-resume → CliError", () => {
+    expect(() =>
+      parseCli(["run", "f.mjs", "--cookies", "./a", "--cookies-resume", "./b"]),
+    ).toThrow(/--cookies and --cookies-resume cannot both be set/)
   })
 
   it("--har <dir>", () => {

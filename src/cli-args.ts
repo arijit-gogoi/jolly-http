@@ -25,6 +25,7 @@ export interface CliArgs {
   watch: boolean
   watchMode: "eager" | "lazy"
   cookiesDir?: string
+  cookiesResumeDir?: string
   harDir?: string
   harReplayPath?: string
   envFiles: string[]
@@ -65,6 +66,7 @@ export function parseCli(argv: string[]): CliArgs {
         watch: { type: "boolean" },
         "watch-mode": { type: "string" },
         cookies: { type: "string" },
+        "cookies-resume": { type: "string" },
         har: { type: "string" },
         "har-replay": { type: "string" },
         "env-file": { type: "string", multiple: true },
@@ -108,6 +110,13 @@ export function parseCli(argv: string[]): CliArgs {
   }
   const watchMode: "eager" | "lazy" = (watchModeRaw as "eager" | "lazy" | undefined) ?? "eager"
   const cookiesDir = strOrUndef(values.cookies)
+  const cookiesResumeDir = strOrUndef(values["cookies-resume"])
+  if (cookiesDir !== undefined && cookiesResumeDir !== undefined) {
+    throw new CliError(
+      "--cookies and --cookies-resume cannot both be set (pick fresh-each-run or session-resume)",
+      2,
+    )
+  }
   const harDir = strOrUndef(values.har)
   const harReplayPath = strOrUndef(values["har-replay"])
   if (harDir !== undefined && harReplayPath !== undefined) {
@@ -144,6 +153,7 @@ export function parseCli(argv: string[]): CliArgs {
       watch,
       watchMode,
       cookiesDir,
+      cookiesResumeDir,
       harDir,
       harReplayPath,
       envFiles,
@@ -174,6 +184,7 @@ export function parseCli(argv: string[]): CliArgs {
       outPath: strOrUndef(values.out),
       env: envFlags,
       cookiesDir,
+      cookiesResumeDir,
       harDir,
       harReplayPath,
       envFiles,
@@ -212,6 +223,7 @@ function baseArgs(partial: Partial<CliArgs> & { mode: CliArgs["mode"] }): CliArg
     watch: partial.watch ?? false,
     watchMode: partial.watchMode ?? "eager",
     cookiesDir: partial.cookiesDir,
+    cookiesResumeDir: partial.cookiesResumeDir,
     harDir: partial.harDir,
     harReplayPath: partial.harReplayPath,
     envFiles: partial.envFiles ?? [],
@@ -264,7 +276,11 @@ OPTIONS
   --quiet, -q               Suppress per-request output
   --out <path>              Write NDJSON samples to path
   --env KEY=VAL             Set env var for workflow (repeatable)
-  --cookies <dir>           Persist cookies as <dir>/vu-N.json (per-VU files)
+  --cookies <dir>           Save cookies to <dir>/vu-N.json on exit (per-VU files).
+                            Each run STARTS WITH AN EMPTY JAR — fresh-each-run is the default.
+  --cookies-resume <dir>    Like --cookies, but ALSO loads any prior-session jar
+                            from <dir>/vu-N.json on startup (httpie --session=name
+                            semantics; cross-run continuity).
   --har <dir>               Record HAR as <dir>/vu-N.har (per-VU files)
   --har-replay <path>       Replay responses from a recorded HAR.
                             file (*.har) → shared across VUs;

@@ -83,12 +83,20 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
         for (let i = 0; i < opts.concurrency; i++) {
           // Per-VU resources: cookie jar + HAR recorder.
           // Jar is always present so each VU's session survives across
-          // iterations within the run. --cookies <dir> only adds disk
-          // persistence (load on start, save on scope exit, including cancel).
-          const cookieJar = opts.cookiesDir
-            ? await pool.resource(loadCookieJar(cookieJarPath(opts.cookiesDir, i)), j => {
-                saveCookieJar(j, cookieJarPath(opts.cookiesDir!, i))
-              })
+          // iterations within the run. v0.4 default semantics:
+          //   --cookies <dir>        : start fresh, save on exit
+          //   --cookies-resume <dir> : load from disk, save on exit
+          //   neither                : in-memory only
+          const persistDir = opts.cookiesDir ?? opts.cookiesResumeDir
+          const cookieJar = persistDir
+            ? await pool.resource(
+                opts.cookiesResumeDir
+                  ? loadCookieJar(cookieJarPath(opts.cookiesResumeDir, i))
+                  : createCookieJar(),
+                j => {
+                  saveCookieJar(j, cookieJarPath(persistDir, i))
+                },
+              )
             : createCookieJar()
           const harRecorder = opts.harDir
             ? await pool.resource(createHarRecorder("0.3.1"), r => {

@@ -50,7 +50,17 @@ export interface RunOptions {
   insecure?: boolean
   quiet?: boolean
   signal?: AbortSignal
+  /**
+   * `--cookies <dir>`. Save the cookie jar to `<dir>/vu-N.json` on exit.
+   * Each run STARTS WITH AN EMPTY JAR — fresh-each-run. v0.4 default.
+   */
   cookiesDir?: string
+  /**
+   * `--cookies-resume <dir>`. Same as cookiesDir plus load any prior-session jar
+   * from disk on startup (cross-run session continuity, httpie --session=name).
+   * Mutually exclusive with cookiesDir at the CLI layer.
+   */
+  cookiesResumeDir?: string
   harDir?: string
   harReplayPath?: string
   /** Explicit --env-file paths, processed in order (later overrides earlier). */
@@ -89,6 +99,7 @@ export interface AdhocOptions {
   outPath?: string
   signal?: AbortSignal
   cookiesDir?: string
+  cookiesResumeDir?: string
   harDir?: string
   harReplayPath?: string
   envFiles?: string[]

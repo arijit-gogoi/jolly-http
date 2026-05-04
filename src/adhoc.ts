@@ -45,6 +45,7 @@ export async function runAdhoc(opts: AdhocOptions): Promise<RunResult> {
     quiet: opts.quiet,
     signal: opts.signal,
     cookiesDir: opts.cookiesDir,
+    cookiesResumeDir: opts.cookiesResumeDir,
     harDir: opts.harDir,
     harReplayPath: opts.harReplayPath,
     envFiles: opts.envFiles,

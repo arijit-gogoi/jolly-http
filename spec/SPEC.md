@@ -44,7 +44,8 @@ jolly-http run flow.mjs --out responses.ndjson        # record per-request sampl
 - `--env-file <path>` (repeatable) — load env vars from a file. Later files override earlier. If unset, `./.env` is auto-loaded if present.
 - `--no-env-file` — disable auto-loading `./.env`
 - `--require-env <path>` — fail-fast if any key from `<path>` is unset or empty in the merged env. Designed for `.env.example` files.
-- `--cookies <dir>` — persist cookies as `<dir>/vu-N.json` (per-VU files)
+- `--cookies <dir>` — save the cookie jar to `<dir>/vu-N.json` on exit (per-VU files). Each run starts with an empty jar (fresh-each-run, **v0.4 default**).
+- `--cookies-resume <dir>` — like `--cookies`, but ALSO loads any prior-session jar from `<dir>/vu-N.json` on startup (cross-run session continuity, `httpie --session=name` semantics). Mutually exclusive with `--cookies`.
 - `--har <dir>` — record HAR as `<dir>/vu-N.har` (per-VU files)
 - `--har-replay <path>` — replay responses from a recorded HAR; `*.har` file is shared across VUs, directory is per-VU. Strict match on method + url + body. Misses throw `HarReplayMissError`. Cannot be combined with `--har`.
 - `--help, -h`, `--version, -V`

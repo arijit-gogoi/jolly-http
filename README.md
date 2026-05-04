@@ -127,7 +127,8 @@ sleep("200ms" | 200)            // signal-aware
 --env-file <path>      Load env vars from a file (repeatable; later wins)
 --no-env-file          Skip auto-loading ./.env
 --require-env <path>   Fail-fast if any key from <path> is unset/empty
---cookies <dir>        Persist cookies as <dir>/vu-N.json (jar is always on)
+--cookies <dir>        Save jar to <dir>/vu-N.json on exit (fresh-each-run default)
+--cookies-resume <dir> Load jar on startup AND save on exit (cross-run continuity)
 --har <dir>            Record HAR as <dir>/vu-N.har
 --har-replay <path>    Replay responses from a recorded HAR (file or dir)
 --insecure, -k         (no-op; see "Self-signed certs" below)
@@ -166,27 +167,23 @@ await request.GET(`${env.API}/me`)               // cookie sent automatically
 await request.GET(`${env.API}/public`, { cookies: false })  // opt out per call
 ```
 
-Without `--cookies`, the jar is **in-memory only** and discarded when the run ends — every invocation starts with a fresh session.
+**Every run starts with an empty jar.** No flags = in-memory jar, discarded when the run ends. Two flags persist to disk; both write per-VU files (`vu-0.json`, `vu-1.json`, …):
 
-### `--cookies <dir>` adds disk persistence
+| Flag | On startup | On exit |
+|------|------------|---------|
+| (none) | empty jar | discarded |
+| `--cookies <dir>` | empty jar | save to `<dir>/vu-N.json` |
+| `--cookies-resume <dir>` | load from `<dir>/vu-N.json` if present | save to `<dir>/vu-N.json` |
 
-```sh
-jolly-http run flow.mjs --cookies ./jar
-ls jar/    # → vu-0.json (per-VU files in load mode: vu-0.json, vu-1.json, …)
-```
+Pick by intent:
 
-`--cookies <dir>` is **session-continuity by design**, the same model as `httpie --session=name`, `xh --session=name`, and `curl --cookie-jar`:
+- **`--cookies <dir>`** is for *audit / inspection*. Run finishes (or `Ctrl-C`s), you have a snapshot of every cookie the server set. Useful for debugging Set-Cookie behavior, sharing reproducers, CI artifacts.
 
-- **First run** with a fresh `<dir>`: jar starts empty, server-set cookies are saved to `<dir>/vu-N.json` on exit (including `Ctrl-C`).
-- **Subsequent runs** with the same `<dir>`: jar is **loaded from disk first**, so prior-session cookies are sent on the very first request. Workflow code that expects a logged-out starting state (e.g. testing the login flow itself) will see the prior session.
+- **`--cookies-resume <dir>`** is for *cross-run session continuity*, the `httpie --session=name` / `xh --session=name` / `curl --cookie-jar` model. Use when you want to log in once and amortize across multiple ad-hoc commands or workflow runs.
 
-If you want fresh-each-run with `--cookies <dir>` semantics (audit trail, but no carryover):
+The two flags are mutually exclusive — pick one shape per invocation.
 
-```sh
-rm -rf ./jar && jolly-http run flow.mjs --cookies ./jar     # explicit reset
-jolly-http run flow.mjs --cookies "./jar-$(date +%s)"        # unique per run
-jolly-http run flow.mjs                                      # don't persist at all
-```
+> **v0.4 breaking change.** Pre-0.4, `--cookies <dir>` loaded prior-session jars on startup. That made flaky CI runs inherit stale logged-in state from previous failures. The default is now fresh-each-run; pass `--cookies-resume <dir>` for the old behavior.
 
 The jar implements RFC 6265 (Domain/Path/Secure/HttpOnly/Expires/Max-Age). It does not handle the public-suffix list or third-party cookie blocking — those are browser concerns.
 
