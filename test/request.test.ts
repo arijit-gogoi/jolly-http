@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { createServer, type Server } from "node:http"
 import { AddressInfo } from "node:net"
-import { request } from "../src/request.js"
+import { request, classifyFetchError } from "../src/request.js"
 import { withRuntime, type RuntimeContext } from "../src/runtime.js"
 import type { Sample, SampleSink } from "../src/types.js"
 
@@ -138,5 +138,84 @@ describe("request", () => {
     await expect(request.GET(`${baseUrl}/x`)).rejects.toThrow(
       /can only be used from inside a workflow function/,
     )
+  })
+
+  it("connection refused → ECONNREFUSED in sample", async () => {
+    const { sink, samples } = collector()
+    // High unreserved port that nothing should listen on. (Node rejects low
+    // ports like 1 with "bad port" before the TCP layer, no system errno
+    // reaches us — useless for testing the classifier on a real refusal.)
+    await expect(
+      withRuntime(mkCtx(sink), () => request.GET("http://127.0.0.1:65000/")),
+    ).rejects.toThrow()
+    expect(samples).toHaveLength(1)
+    expect(samples[0].ok).toBe(false)
+    if (!samples[0].ok) {
+      // On most platforms this is ECONNREFUSED. On some Windows + Node combos
+      // it surfaces as ECONNRESET. Accept either, but reject the bare TypeError.
+      expect(samples[0].error).toMatch(/^E[A-Z]+/)
+      expect(samples[0].error).not.toBe("TypeError")
+    }
+  })
+})
+
+describe("classifyFetchError", () => {
+  it("preserves AbortError at the top level", () => {
+    const err = Object.assign(new Error("aborted"), { name: "AbortError" })
+    expect(classifyFetchError(err)).toEqual({ name: "AbortError", message: "aborted" })
+  })
+
+  it("preserves TimeoutError at the top level", () => {
+    const err = Object.assign(new Error("timed out"), { name: "TimeoutError" })
+    expect(classifyFetchError(err)).toEqual({ name: "TimeoutError", message: "timed out" })
+  })
+
+  it("walks .cause to find a system errno code", () => {
+    const inner = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), {
+      code: "ECONNREFUSED",
+    })
+    const outer = Object.assign(new TypeError("fetch failed"), { cause: inner })
+    const r = classifyFetchError(outer)
+    expect(r.name).toBe("ECONNREFUSED")
+    expect(r.message).toContain("ECONNREFUSED")
+    expect(r.message).toContain("127.0.0.1:1")
+  })
+
+  it("walks .cause for ENOTFOUND", () => {
+    const inner = Object.assign(new Error("getaddrinfo ENOTFOUND no-such-host.invalid"), {
+      code: "ENOTFOUND",
+    })
+    const outer = Object.assign(new TypeError("fetch failed"), { cause: inner })
+    expect(classifyFetchError(outer).name).toBe("ENOTFOUND")
+  })
+
+  it("recognizes UND_ERR_* names", () => {
+    const inner = Object.assign(new Error("body timeout"), { name: "UND_ERR_BODY_TIMEOUT" })
+    const outer = Object.assign(new TypeError("fetch failed"), { cause: inner })
+    expect(classifyFetchError(outer).name).toBe("UND_ERR_BODY_TIMEOUT")
+  })
+
+  it("falls back to top-level name when no classifier found", () => {
+    const err = new TypeError("fetch failed")
+    const r = classifyFetchError(err)
+    expect(r.name).toBe("TypeError")
+    expect(r.message).toBe("fetch failed")
+  })
+
+  it("chains messages when multiple .cause hops have no code", () => {
+    const innermost = new Error("inner detail")
+    const middle = Object.assign(new Error("middle wrap"), { cause: innermost })
+    const outer = Object.assign(new TypeError("fetch failed"), { cause: middle })
+    const r = classifyFetchError(outer)
+    expect(r.message).toContain("fetch failed")
+    expect(r.message).toContain("middle wrap")
+    expect(r.message).toContain("inner detail")
+  })
+
+  it("does not loop forever on cyclic cause chains", () => {
+    const a: Record<string, unknown> = { name: "A", message: "a" }
+    const b: Record<string, unknown> = { name: "B", message: "b", cause: a }
+    a.cause = b // cycle
+    expect(() => classifyFetchError(a)).not.toThrow()
   })
 })

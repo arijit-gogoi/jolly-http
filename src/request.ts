@@ -104,10 +104,10 @@ export async function performRequest(
   } catch (err) {
     cleanup()
     const duration_ms = performance.now() - started
-    const e = err as { name?: string; message?: string }
     if (harId !== undefined && ctx.harRecorder) {
       ctx.harRecorder.recordError(harId, err as Error, duration_ms)
     }
+    const { name, message } = classifyFetchError(err)
     ctx.sink.write({
       ok: false,
       t,
@@ -116,8 +116,8 @@ export async function performRequest(
       method,
       url: finalUrl,
       duration_ms,
-      error: e?.name ?? "Error",
-      message: e?.message ?? String(err),
+      error: name,
+      message,
       ts,
     })
     throw err
@@ -193,6 +193,59 @@ function bufToText(buf: ArrayBuffer): string {
     return new TextDecoder("utf-8", { fatal: false }).decode(buf)
   } catch {
     return `(${buf.byteLength} bytes, undecodable)`
+  }
+}
+
+/**
+ * Walk `err.cause` to classify a thrown fetch error into a structured
+ * (name, message) pair surfaced in NDJSON Sample.error/Sample.message.
+ *
+ * undici throws bare `TypeError: fetch failed` for everything (DNS failure,
+ * connection refused, abort, downstream timeout). The actionable diagnostic
+ * is one or two .cause hops down. Common system errors expose a `code`
+ * (ECONNREFUSED, ENOTFOUND, ECONNRESET, ETIMEDOUT, EHOSTUNREACH);
+ * undici-internal errors keep their own UND_ERR_* names. AbortError is
+ * preserved as-is at the top level.
+ */
+export function classifyFetchError(err: unknown): { name: string; message: string } {
+  const top = err as { name?: string; message?: string; cause?: unknown }
+  // AbortError comes through directly; never walk past it.
+  if (top?.name === "AbortError" || top?.name === "TimeoutError") {
+    return { name: top.name, message: top.message ?? String(err) }
+  }
+  // Find the deepest .cause that has a useful classifier.
+  let cur: { name?: string; message?: string; code?: string; cause?: unknown } | undefined =
+    top as typeof cur
+  let hops = 0
+  while (cur && hops < 5) {
+    const code = typeof cur.code === "string" ? cur.code : undefined
+    if (code) {
+      // System errno (Node net layer): ECONNREFUSED, ENOTFOUND, etc.
+      // Use the code as the structured name; preserve the message for
+      // human context.
+      return {
+        name: code,
+        message: cur.message ? `${code}: ${cur.message}` : code,
+      }
+    }
+    if (cur.name && cur.name.startsWith("UND_ERR_")) {
+      return { name: cur.name, message: cur.message ?? cur.name }
+    }
+    cur = cur.cause as typeof cur
+    hops++
+  }
+  // Fall back to the top-level name and a chained message.
+  const chain: string[] = []
+  let walk: { message?: string; cause?: unknown } | undefined = top
+  let h = 0
+  while (walk && h < 5) {
+    if (walk.message) chain.push(walk.message)
+    walk = walk.cause as typeof walk
+    h++
+  }
+  return {
+    name: top?.name ?? "Error",
+    message: chain.length > 0 ? chain.join(" -> ") : String(err),
   }
 }
 
