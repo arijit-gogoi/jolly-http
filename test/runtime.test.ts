@@ -30,6 +30,67 @@ describe("assert", () => {
       expect((e as Error).name).toBe("AssertionError")
     }
   })
+  it("appends last-response context when present in runtime", async () => {
+    const ctx = mkCtx({
+      lastResponse: {
+        method: "GET",
+        url: "https://api.example.com/me",
+        status: 404,
+        headers: { "content-type": "application/json", "x-trace-id": "abc123" },
+        bodyText: '{"error":"not authenticated"}',
+      },
+    })
+    let captured: Error | undefined
+    await withRuntime(ctx, async () => {
+      try {
+        assert(false, "C5: expected 200, got 404")
+      } catch (e) {
+        captured = e as Error
+      }
+    })
+    expect(captured).toBeInstanceOf(AssertionError)
+    const msg = captured!.message
+    expect(msg).toContain("C5: expected 200, got 404")
+    expect(msg).toContain("-> last request: GET https://api.example.com/me 404")
+    expect(msg).toContain("content-type: application/json")
+    expect(msg).toContain("x-trace-id: abc123")
+    expect(msg).toContain('{"error":"not authenticated"}')
+    expect((captured as AssertionError).lastResponse?.status).toBe(404)
+  })
+  it("does not append context when no prior response in this runtime", async () => {
+    const ctx = mkCtx() // no lastResponse
+    let captured: Error | undefined
+    await withRuntime(ctx, async () => {
+      try {
+        assert(false, "no request yet")
+      } catch (e) {
+        captured = e as Error
+      }
+    })
+    expect(captured!.message).toBe("no request yet")
+    expect((captured as AssertionError).lastResponse).toBeUndefined()
+  })
+  it("does not truncate the response body in the appended context", async () => {
+    const huge = "x".repeat(10_000)
+    const ctx = mkCtx({
+      lastResponse: {
+        method: "POST",
+        url: "https://api/post",
+        status: 500,
+        headers: {},
+        bodyText: huge,
+      },
+    })
+    let captured: Error | undefined
+    await withRuntime(ctx, async () => {
+      try {
+        assert(false, "boom")
+      } catch (e) {
+        captured = e as Error
+      }
+    })
+    expect(captured!.message).toContain(huge)
+  })
 })
 
 describe("env", () => {
@@ -101,8 +162,9 @@ describe("withRuntime / currentContext", () => {
       expect(currentContext()).toBe(ctx)
     })
   })
-  it("currentContext throws outside a runtime", () => {
-    expect(() => currentContext()).toThrow(/outside a workflow/)
+  it("currentContext throws outside a runtime with a helpful message", () => {
+    expect(() => currentContext()).toThrow(/can only be used from inside a workflow function/)
+    expect(() => currentContext()).toThrow(/Move the call inside your default export/)
   })
   it("tryCurrentContext returns undefined outside", () => {
     expect(tryCurrentContext()).toBeUndefined()

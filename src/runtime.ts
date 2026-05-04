@@ -5,11 +5,47 @@ import type { Sample, SampleSink, VuContext } from "./types.js"
 import type { CookieJar } from "./cookies.js"
 import type { HarRecorder, HarReplayer } from "./har.js"
 
+/**
+ * Snapshot of the most recently seen response in the current runtime context.
+ * Auto-appended to AssertionError messages so failures are debuggable without
+ * scattering console.log() through workflows. Body is the FULL response — no
+ * truncation. Debugging needs everything; the user is reading the error in a
+ * terminal and can scroll.
+ */
+export interface LastResponseSnapshot {
+  method: string
+  url: string
+  status: number
+  headers: Record<string, string>
+  bodyText: string
+}
+
 export class AssertionError extends Error {
-  constructor(message: string) {
-    super(message)
+  /** Set by the formatter when the runtime had a last-seen Response. */
+  readonly lastResponse?: LastResponseSnapshot
+
+  constructor(message: string, lastResponse?: LastResponseSnapshot) {
+    super(formatAssertionMessage(message, lastResponse))
     this.name = "AssertionError"
+    this.lastResponse = lastResponse
   }
+}
+
+function formatAssertionMessage(
+  message: string,
+  last: LastResponseSnapshot | undefined,
+): string {
+  if (!last) return message
+  const headerLines = Object.entries(last.headers)
+    .map(([k, v]) => `      ${k}: ${v}`)
+    .join("\n")
+  return [
+    message,
+    `  -> last request: ${last.method} ${last.url} ${last.status}`,
+    headerLines ? `  -> response headers:\n${headerLines}` : `  -> response headers: (none)`,
+    `  -> response body:`,
+    last.bodyText,
+  ].join("\n")
 }
 
 export interface RuntimeContext {
@@ -25,6 +61,12 @@ export interface RuntimeContext {
   cookieJar?: CookieJar
   harRecorder?: HarRecorder
   harReplay?: HarReplayer
+  /**
+   * Most recent Response observed by performRequest in this VU's context.
+   * Used by AssertionError to auto-append diagnostic context. Mutable on the
+   * context object so each request overwrites the previous snapshot.
+   */
+  lastResponse?: LastResponseSnapshot
 }
 
 const STORE = new AsyncLocalStorage<RuntimeContext>()
@@ -37,8 +79,9 @@ export function currentContext(): RuntimeContext {
   const ctx = STORE.getStore()
   if (!ctx) {
     throw new Error(
-      "jolly-http runtime used outside a workflow. Call request/assert/sleep " +
-        "from inside the default-exported workflow function.",
+      "jolly-http: request/assert/env/sleep can only be used from inside a workflow function.\n" +
+        "Helper modules are fine, but the helper has to be CALLED from a workflow function,\n" +
+        "not run at import time. Move the call inside your default export, prologue, or epilogue.",
     )
   }
   return ctx
@@ -53,7 +96,8 @@ export function emitSample(s: Sample): void {
 }
 
 export function assert(cond: unknown, message?: string): asserts cond {
-  if (!cond) throw new AssertionError(message ?? "assertion failed")
+  if (cond) return
+  throw new AssertionError(message ?? "assertion failed", tryCurrentContext()?.lastResponse)
 }
 
 /**

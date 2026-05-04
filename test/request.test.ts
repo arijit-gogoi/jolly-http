@@ -135,6 +135,8 @@ describe("request", () => {
   })
 
   it("throws with clear error when called outside runtime", async () => {
-    await expect(request.GET(`${baseUrl}/x`)).rejects.toThrow(/outside a workflow/)
+    await expect(request.GET(`${baseUrl}/x`)).rejects.toThrow(
+      /can only be used from inside a workflow function/,
+    )
   })
 })

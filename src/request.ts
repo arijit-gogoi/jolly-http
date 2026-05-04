@@ -131,7 +131,8 @@ export async function performRequest(
 
 /**
  * Common success-path: emit per-request sample, store cookies, finish HAR
- * recording. Used by both the live-fetch and HAR-replay branches.
+ * recording, snapshot the response into runtime context for AssertionError
+ * diagnostics. Used by both the live-fetch and HAR-replay branches.
  */
 function finalizeSuccess(
   ctx: RuntimeContext,
@@ -152,6 +153,17 @@ function finalizeSuccess(
   if (harId !== undefined && ctx.harRecorder) {
     ctx.harRecorder.recordResponse(harId, res, buf, duration_ms)
   }
+  // Snapshot for AssertionError diagnostics. Stored on the context object
+  // (mutable) so subsequent requests in the same VU overwrite it. Body is
+  // decoded with utf-8; binary responses still produce something readable
+  // enough for terminal output. No truncation — see runtime.ts comment.
+  ctx.lastResponse = {
+    method,
+    url: finalUrl,
+    status: res.status,
+    headers: headersToRecord(res.headers),
+    bodyText: bufToText(buf),
+  }
   ctx.sink.write({
     ok: true,
     t,
@@ -165,6 +177,23 @@ function finalizeSuccess(
     ts,
   })
   return res
+}
+
+function headersToRecord(h: Headers): Record<string, string> {
+  const out: Record<string, string> = {}
+  h.forEach((v, k) => {
+    out[k] = v
+  })
+  return out
+}
+
+function bufToText(buf: ArrayBuffer): string {
+  if (buf.byteLength === 0) return ""
+  try {
+    return new TextDecoder("utf-8", { fatal: false }).decode(buf)
+  } catch {
+    return `(${buf.byteLength} bytes, undecodable)`
+  }
 }
 
 function appendQuery(url: string, query?: Record<string, string | number | boolean>): string {
