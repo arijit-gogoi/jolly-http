@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { sleep as coopSleep } from "jolly-coop"
 import { parseDuration } from "jolly-coop"
-import type { Sample, SampleSink, VuContext } from "./types.js"
+import type { Sample, SampleSink, SamplePhase, VuContext } from "./types.js"
 import type { CookieJar } from "./cookies.js"
 import type { HarRecorder, HarReplayer } from "./har.js"
 
@@ -67,6 +67,13 @@ export interface RuntimeContext {
    * context object so each request overwrites the previous snapshot.
    */
   lastResponse?: LastResponseSnapshot
+  /**
+   * Phase tag stamped onto samples emitted from this context. Omitted (or
+   * `"iteration"`) for the default-exported workflow body; `"prologue"` /
+   * `"epilogue"` for the named hooks. Lets downstream NDJSON consumers
+   * distinguish setup/teardown traffic from iteration traffic.
+   */
+  phase?: SamplePhase
 }
 
 const STORE = new AsyncLocalStorage<RuntimeContext>()

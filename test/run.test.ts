@@ -113,9 +113,11 @@ export default async function (vu, signal) {
     expect(JSON.parse(lines[1]).url).toContain("/b")
   })
 
-  it("rejects if workflow path missing default export", async () => {
+  it("returns {ok:false} when workflow path missing default export", async () => {
     const path = writeWorkflow("nodefault.mjs", `export const x = 1`)
-    await expect(runWorkflow({ workflowPath: path })).rejects.toThrow(/default export/)
+    const r = await runWorkflow({ workflowPath: path })
+    expect(r.ok).toBe(false)
+    expect((r.error as Error).message).toMatch(/default export/)
   })
 
   it("env flags propagate to workflow", async () => {
@@ -376,6 +378,123 @@ export default async function (vu, signal) {
     const r2 = await runWorkflow({ workflowPath: path, cookiesDir: jarDir })
     expect(r2.ok).toBe(true)
     expect((r2.value as { status: number }).status).toBe(401)
+  })
+
+  describe("prologue / epilogue hooks", () => {
+    it("runs prologue once before iteration; epilogue once after", async () => {
+      const path = writeWorkflow(
+        "hooks-happy.mjs",
+        `import { request } from "jolly-http"
+let phases = []
+export async function prologue(env, signal) {
+  phases.push("prologue")
+  await request.GET("${baseUrl}/hello", { signal })
+}
+export default async function () {
+  phases.push("default")
+}
+export async function epilogue(env, signal) {
+  phases.push("epilogue")
+  await request.GET("${baseUrl}/hello", { signal })
+}
+export function _phases() { return phases }
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      expect(r.ok).toBe(true)
+      // Re-import the module to read its module-state captured by hooks.
+      const mod = await import(/* @vite-ignore */ "file://" + path.replace(/\\/g, "/"))
+      expect(mod._phases()).toEqual(["prologue", "default", "epilogue"])
+    })
+
+    it("epilogue STILL runs when prologue throws", async () => {
+      // The discriminating test. Prologue creates state and immediately fails;
+      // epilogue must run to clean it up. This is the contract — partial-setup
+      // teardown matches jest beforeAll/afterAll, pytest fixtures, etc.
+      const path = writeWorkflow(
+        "hooks-prologue-throws.mjs",
+        `let prologueRan = false, defaultRan = false, epilogueRan = false
+export async function prologue() {
+  prologueRan = true
+  throw new Error("prologue boom")
+}
+export default async function () {
+  defaultRan = true
+}
+export async function epilogue() {
+  epilogueRan = true
+}
+export function _flags() { return { prologueRan, defaultRan, epilogueRan } }
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      const mod = await import(/* @vite-ignore */ "file://" + path.replace(/\\/g, "/"))
+      const flags = mod._flags()
+      expect(flags.prologueRan).toBe(true)
+      expect(flags.defaultRan).toBe(false)
+      expect(flags.epilogueRan).toBe(true)
+      expect(r.ok).toBe(false)
+      expect((r.error as Error).message).toMatch(/prologue boom/)
+    })
+
+    it("epilogue runs when default throws", async () => {
+      const path = writeWorkflow(
+        "hooks-default-throws.mjs",
+        `let epilogueRan = false
+export default async function () {
+  throw new Error("default boom")
+}
+export async function epilogue() {
+  epilogueRan = true
+}
+export function _flag() { return epilogueRan }
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      const mod = await import(/* @vite-ignore */ "file://" + path.replace(/\\/g, "/"))
+      expect(mod._flag()).toBe(true)
+      expect(r.ok).toBe(false)
+      expect((r.error as Error).message).toMatch(/default boom/)
+    })
+
+    it("samples emitted from prologue carry phase: 'prologue'", async () => {
+      const ndjsonPath = join(tmp, "hooks-phase.ndjson")
+      if (existsSync(ndjsonPath)) rmSync(ndjsonPath)
+      const path = writeWorkflow(
+        "hooks-phase.mjs",
+        `import { request } from "jolly-http"
+export async function prologue(env, signal) {
+  await request.GET("${baseUrl}/hello", { signal })  // phase: prologue
+}
+export default async function (vu, signal) {
+  await request.GET("${baseUrl}/hello", { signal })  // phase: omitted (iteration)
+}
+export async function epilogue(env, signal) {
+  await request.GET("${baseUrl}/hello", { signal })  // phase: epilogue
+}
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path, outPath: ndjsonPath })
+      expect(r.ok).toBe(true)
+      const lines = readFileSync(ndjsonPath, "utf8").trim().split("\n")
+      expect(lines).toHaveLength(3)
+      const samples = lines.map(l => JSON.parse(l))
+      expect(samples[0].phase).toBe("prologue")
+      expect(samples[1].phase).toBeUndefined()
+      expect(samples[2].phase).toBe("epilogue")
+    })
+
+    it("rejects non-function prologue", async () => {
+      const path = writeWorkflow(
+        "hooks-bad-prologue.mjs",
+        `export const prologue = "not a function"
+export default async function () {}
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      expect(r.ok).toBe(false)
+      expect((r.error as Error).message).toMatch(/prologue must be a function/)
+    })
   })
 
   it("--cookies-resume <dir>: second run DOES inherit cookies from disk", async () => {

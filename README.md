@@ -113,6 +113,50 @@ env.FOO                         // --env flags + process.env + .env files
 sleep("200ms" | 200)            // signal-aware
 ```
 
+When an `assert(...)` fails inside a workflow, the thrown `AssertionError` auto-includes the most recently completed request's URL, status, headers, and full response body. Debugging assertion failures usually means staring at the error message and that's it — no `console.log` cargo-culting required.
+
+## Setup and teardown
+
+Two optional named exports run once per process around the iteration loop:
+
+```js
+// flow.mjs
+import { request, env } from "jolly-http"
+
+let testUserId               // module-level state, shared across hooks (real JS)
+
+export async function prologue(env, signal) {
+  // Runs ONCE before any iteration. throw to abort the run.
+  const r = await request.POST(`${env.API}/test-users`, {
+    json: { email: "test@example.com" },
+    signal,
+  })
+  testUserId = (await r.json()).id
+}
+
+export default async function (vu, signal) {
+  // Runs per VU per iteration (or once in single-run mode).
+  await request.POST(`${env.API}/login`, { json: { id: testUserId }, signal })
+  // ...
+}
+
+export async function epilogue(env, signal) {
+  // Runs ONCE after iterations. ALWAYS fires — including on Ctrl-C and
+  // even when prologue threw. Use for cleanup that must happen regardless.
+  if (testUserId) {
+    await request.DELETE(`${env.API}/test-users/${testUserId}`, { signal })
+  }
+}
+```
+
+The contract:
+
+- **`prologue` runs before any iteration.** Throwing aborts the run with exit 1.
+- **`epilogue` ALWAYS runs.** Including: prologue threw, default threw, abort/Ctrl-C. This matches `jest beforeAll/afterAll`, `pytest fixtures`, etc. — partial-setup teardown is the point. Implemented as a scope resource registered before prologue, so cleanup is guaranteed.
+- **State across hooks** uses module-level `let`. There is no separate state-passing API. Real JS, the wedge.
+- **`request.*` / `assert` / `env` / `sleep` work inside hooks.** They run inside their own runtime context; samples emitted from hooks carry `phase: "prologue"` or `phase: "epilogue"` in the NDJSON output (omitted for iteration samples).
+- **A workflow file with only `prologue`/`epilogue` and no `default` export is invalid** — that's a script, not a workflow.
+
 ## Common options
 
 ```

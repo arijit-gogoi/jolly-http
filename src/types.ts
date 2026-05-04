@@ -8,11 +8,34 @@ export interface VuContext {
 
 export type WorkflowFn = (vu: VuContext, signal: AbortSignal) => Promise<unknown> | unknown
 
+/**
+ * Hook function called once-per-process around the iteration loop.
+ * `prologue` runs before any iteration; `epilogue` runs after all iterations
+ * (including on abort/Ctrl-C, including when prologue threw).
+ *
+ * Hooks receive the merged `env` and the parent scope's `signal`. They run
+ * inside a synthetic runtime context so `request.*` / `assert` / `sleep` /
+ * `env` work normally — the same module-level imports used in the default
+ * export. Module-level `let` bindings are the recommended way to carry state
+ * between hooks (real JS, no separate state-passing API).
+ */
+export type HookFn = (
+  env: Readonly<Record<string, string>>,
+  signal: AbortSignal,
+) => Promise<unknown> | unknown
+
+/** Phase label for samples emitted by each runtime context. */
+export type SamplePhase = "prologue" | "iteration" | "epilogue"
+
 export interface SampleSuccess {
   ok: true
   t: number
   vu: number
   iteration: number
+  /** Optional phase tag. Omitted on samples from the default workflow body
+   *  (treated as `"iteration"`). Present on samples from prologue/epilogue.
+   *  Old NDJSON consumers ignore unknown fields — additive, backward-compat. */
+  phase?: SamplePhase
   method: string
   url: string
   status: number
@@ -26,6 +49,7 @@ export interface SampleError {
   t: number
   vu: number
   iteration: number
+  phase?: SamplePhase
   method: string
   url: string
   duration_ms: number

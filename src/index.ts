@@ -3,7 +3,8 @@ export const VERSION = "0.3.1"
 export { request, performRequest } from "./request.js"
 export { parseDotenv, readEnvKeys, loadEnvFile } from "./dotenv.js"
 export { assert, AssertionError, env, sleep } from "./runtime.js"
-export { runWorkflow, runWorkflowFn, loadWorkflow } from "./run.js"
+export { runWorkflow, runWorkflowFn, loadWorkflow, loadWorkflowModule } from "./run.js"
+export type { LoadedWorkflow, WorkflowHooks } from "./run.js"
 export { runAdhoc } from "./adhoc.js"
 export { runLoad, Stats, PercentileBuffer, RateLimiter } from "./load.js"
 export type { LoadResult, StatsSnapshot, EndedBy } from "./load.js"
@@ -16,6 +17,8 @@ export type {
   HttpMethod,
   VuContext,
   WorkflowFn,
+  HookFn,
+  SamplePhase,
   Sample,
   SampleSuccess,
   SampleError,

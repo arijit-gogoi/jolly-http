@@ -117,9 +117,18 @@ export default async function (vu, signal) {
 - **`vu` parameter** — `{ id: number, iteration: number, env: Readonly<Record<string,string>> }`
 - **`signal` parameter** — the scope's `AbortSignal`; thread to every `fetch`/`sleep` that should honor cancellation
 - **`request.GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS(url, init): Promise<Response>`** — `Response` is `globalThis.Response`-shaped (`.status`, `.headers`, `.json()`, `.text()`, `.arrayBuffer()`)
-- **`assert(cond: unknown, msg?: string): void`** — throws `AssertionError` on falsy
+- **`assert(cond: unknown, msg?: string): void`** — throws `AssertionError` on falsy. When called from inside a workflow, the thrown `AssertionError` auto-includes the most recent request's URL/status/headers/full response body for debugging (v0.4+).
 - **`env`** — frozen proxy over `process.env` + `--env` flag overrides
 - **`sleep(ms: number | "30s" | "2m"): Promise<void>`** — signal-aware via runtime context
+
+### Optional named exports (v0.4+, frozen API addition)
+
+- **`prologue?: async function (env, signal) => any`** — runs once per process before any iteration. Receives the merged `env` and the parent scope's `AbortSignal`. Throws abort the run (default + epilogue still fire — see below). `request.*`, `assert`, `env`, `sleep` all work inside.
+- **`epilogue?: async function (env, signal) => any`** — runs once per process after all iterations finish, on abort/Ctrl-C, AND when prologue threw. This matches `jest beforeAll`/`afterAll`, `pytest fixtures`, etc. — partial-setup teardown is the contract. Implemented as a scope resource registered before prologue, so cleanup is guaranteed.
+
+If the workflow file has only `prologue` (no `default`), it's not a workflow — load fails. The `default` export is still required.
+
+State-passing between hooks uses module-level `let` bindings (real JS — the wedge). There is no separate state-passing API.
 
 ### `request` init options
 
@@ -169,7 +178,8 @@ When `--out <path>` is set, one line per HTTP request issued by the workflow.
 | `ok`          | boolean | Discriminator — `true` for success, `false` for error    |
 | `t`           | number  | Seconds since run start (monotonic)                      |
 | `vu`          | number  | Virtual user id — `0` in single-run mode                 |
-| `iteration`   | number  | Iteration index within the VU                            |
+| `iteration`   | number  | Iteration index within the VU. `-1` from `prologue`, `-2` from `epilogue` (v0.4+). |
+| `phase`       | string? | (v0.4+, optional, additive) `"prologue"` or `"epilogue"` for samples emitted from those hooks. **Omitted on iteration samples** — old consumers that don't read this field treat all samples uniformly, which is correct for iteration-only consumers. |
 | `method`      | string  | HTTP method                                              |
 | `url`         | string  | Fully resolved URL (query params included)               |
 | `status`      | number  | HTTP status code (success only)                          |

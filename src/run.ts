@@ -7,7 +7,7 @@ import { createSampleSink } from "./output.js"
 import { createCookieJar, loadCookieJar, saveCookieJar, cookieJarPath } from "./cookies.js"
 import { createHarRecorder, saveHar, harPath, loadHarReplay } from "./har.js"
 import { loadEnvFile, readEnvKeys } from "./dotenv.js"
-import type { RunOptions, RunResult, WorkflowFn } from "./types.js"
+import type { HookFn, RunOptions, RunResult, WorkflowFn } from "./types.js"
 
 /**
  * Resolve env file paths into a list of parsed `.env` records, in order
@@ -56,7 +56,23 @@ export function validateRequiredEnv(
   }
 }
 
+/**
+ * Workflow module shape — default export plus optional named hooks.
+ * `prologue` runs once before any iteration; `epilogue` runs once after all
+ * iterations OR on abort/Ctrl-C OR when prologue threw (LIFO via scope.resource).
+ */
+export interface LoadedWorkflow {
+  default: WorkflowFn
+  prologue?: HookFn
+  epilogue?: HookFn
+}
+
 export async function loadWorkflow(path: string): Promise<WorkflowFn> {
+  const w = await loadWorkflowModule(path)
+  return w.default
+}
+
+export async function loadWorkflowModule(path: string): Promise<LoadedWorkflow> {
   const abs = resolve(path)
   const url = pathToFileURL(abs).href
   let mod: Record<string, unknown>
@@ -70,12 +86,24 @@ export async function loadWorkflow(path: string): Promise<WorkflowFn> {
   if (typeof fn !== "function") {
     throw new Error(`workflow ${path}: default export must be a function, got ${typeof fn}`)
   }
-  if (fn.length > 2) {
+  if ((fn as Function).length > 2) {
     process.stderr.write(
-      `warn: workflow ${path}: default export takes ${fn.length} args (expected: vu, signal)\n`,
+      `warn: workflow ${path}: default export takes ${(fn as Function).length} args (expected: vu, signal)\n`,
     )
   }
-  return fn as WorkflowFn
+  const prologue = mod.prologue
+  const epilogue = mod.epilogue
+  if (prologue !== undefined && typeof prologue !== "function") {
+    throw new Error(`workflow ${path}: prologue must be a function, got ${typeof prologue}`)
+  }
+  if (epilogue !== undefined && typeof epilogue !== "function") {
+    throw new Error(`workflow ${path}: epilogue must be a function, got ${typeof epilogue}`)
+  }
+  return {
+    default: fn as WorkflowFn,
+    prologue: prologue as HookFn | undefined,
+    epilogue: epilogue as HookFn | undefined,
+  }
 }
 
 /**
@@ -84,11 +112,28 @@ export async function loadWorkflow(path: string): Promise<WorkflowFn> {
  * registered sink resource even on abort/failure.
  */
 export async function runWorkflow(opts: RunOptions): Promise<RunResult> {
-  const fn = await loadWorkflow(opts.workflowPath)
-  return runWorkflowFn(fn, opts)
+  let mod: LoadedWorkflow
+  try {
+    mod = await loadWorkflowModule(opts.workflowPath)
+  } catch (err) {
+    return { ok: false, error: err, samples: 0 }
+  }
+  return runWorkflowFn(mod.default, opts, {
+    prologue: mod.prologue,
+    epilogue: mod.epilogue,
+  })
 }
 
-export async function runWorkflowFn(fn: WorkflowFn, opts: RunOptions): Promise<RunResult> {
+export interface WorkflowHooks {
+  prologue?: HookFn
+  epilogue?: HookFn
+}
+
+export async function runWorkflowFn(
+  fn: WorkflowFn,
+  opts: RunOptions,
+  hooks: WorkflowHooks = {},
+): Promise<RunResult> {
   let layers: Record<string, string>[]
   try {
     layers = resolveEnvLayers(opts)
@@ -138,21 +183,65 @@ export async function runWorkflowFn(fn: WorkflowFn, opts: RunOptions): Promise<R
         })
       : undefined
     const harReplay = opts.harReplayPath ? loadHarReplay(opts.harReplayPath, 0) : undefined
-    const ctx: RuntimeContext = {
-      vu: { id: 0, iteration: 0, env },
+    const tZero = performance.now()
+    const userAgent = opts.userAgent ?? `jolly-http/${(await getVersion())}`
+    const baseDefaults = {
+      userAgent,
+      perRequestTimeoutMs: opts.perRequestTimeoutMs,
+      insecure: opts.insecure,
+    }
+
+    // Build a phase-tagged context. Each phase (prologue, iteration, epilogue)
+    // gets its own context instance — separate lastResponse, separate phase
+    // tag stamped onto samples. The iteration phase OMITS the phase tag (per
+    // SPEC §4 — additive optional field, samples without it default to
+    // "iteration"). Prologue/epilogue stamp the tag explicitly. Iteration uses
+    // sentinel ids on vu.iteration so downstream consumers reading old-shape
+    // NDJSON can still distinguish.
+    const mkCtx = (
+      phase: "prologue" | "iteration" | "epilogue",
+      iteration: number,
+    ): RuntimeContext => ({
+      vu: { id: 0, iteration, env },
       sink: wrappedSink,
       signal: s.signal,
-      tZero: performance.now(),
-      defaults: {
-        userAgent: opts.userAgent ?? `jolly-http/${(await getVersion())}`,
-        perRequestTimeoutMs: opts.perRequestTimeoutMs,
-        insecure: opts.insecure,
-      },
+      tZero,
+      defaults: baseDefaults,
       cookieJar,
       harRecorder,
       harReplay,
+      ...(phase === "iteration" ? {} : { phase }),
+    })
+
+    // Register epilogue as a scope resource BEFORE invoking prologue. This is
+    // the discriminating decision: if prologue throws, the scope unwinds and
+    // resources release in LIFO order. Because epilogue is registered AFTER
+    // sink/jar, it releases FIRST — sink and jar are still alive while
+    // epilogue runs (so it can emit samples and read/write cookies). And
+    // because it's registered *before* prologue runs, it fires whether
+    // prologue succeeded, threw, or was aborted.
+    if (hooks.epilogue) {
+      const epi = hooks.epilogue
+      await s.resource(true, async () => {
+        try {
+          await withRuntime(mkCtx("epilogue", -2), async () => epi(env, s.signal))
+        } catch (err) {
+          // Epilogue failures are surfaced to stderr but don't override the
+          // original error (if any). The scope's existing error wins.
+          process.stderr.write(
+            `epilogue threw: ${(err as Error)?.message ?? String(err)}\n`,
+          )
+        }
+      })
     }
-    return withRuntime(ctx, async () => fn(ctx.vu, s.signal))
+
+    if (hooks.prologue) {
+      const pro = hooks.prologue
+      await withRuntime(mkCtx("prologue", -1), async () => pro(env, s.signal))
+    }
+
+    const iterCtx = mkCtx("iteration", 0)
+    return withRuntime(iterCtx, async () => fn(iterCtx.vu, s.signal))
   }).then(
     value => ({ ok: true as const, value }),
     error => ({ ok: false as const, error }),

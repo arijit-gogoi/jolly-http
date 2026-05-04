@@ -1,7 +1,7 @@
 import { scope, sleep, yieldNow, isStructuralCancellation } from "jolly-coop"
 import { buildEnv, withRuntime, type RuntimeContext } from "./runtime.js"
 import { createSampleSink } from "./output.js"
-import { loadWorkflow, resolveEnvLayers, validateRequiredEnv } from "./run.js"
+import { loadWorkflowModule, resolveEnvLayers, validateRequiredEnv } from "./run.js"
 import { createCookieJar, loadCookieJar, saveCookieJar, cookieJarPath, type CookieJar } from "./cookies.js"
 import { createHarRecorder, saveHar, harPath, loadHarReplay, type HarRecorder, type HarReplayer } from "./har.js"
 import type { LoadOptions, Sample, SampleSink, VuContext, WorkflowFn } from "./types.js"
@@ -46,7 +46,8 @@ export interface LoadResult {
  * per-request per PLAN §4.
  */
 export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
-  const fn = await loadWorkflow(opts.workflowPath)
+  const mod = await loadWorkflowModule(opts.workflowPath)
+  const fn = mod.default
   const layers = resolveEnvLayers(opts)
   const env = buildEnv(layers, opts.env)
   if (opts.requireEnvPath) validateRequiredEnv(env, opts.requireEnvPath)
@@ -74,6 +75,48 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
   try {
     await scope({ deadline, signal: opts.signal }, async root => {
       await root.resource(sink, s => s.close())
+
+      // Prologue / epilogue run once per process on the root scope. Each gets
+      // its own synthetic single-VU runtime context with a fresh in-memory jar
+      // (no per-VU jar sharing — hooks are about side-channel cleanup, not
+      // session state shared with iterations). Epilogue is registered as a
+      // resource BEFORE prologue runs so it fires even when prologue throws.
+      const baseDefaults = {
+        userAgent,
+        perRequestTimeoutMs: opts.perRequestTimeoutMs,
+        insecure: opts.insecure,
+      }
+      const mkHookCtx = (phase: "prologue" | "epilogue", iteration: number): RuntimeContext => {
+        // Lazy-import here would create cycles — we already imported
+        // createCookieJar above for VU jars. Fresh jar per hook.
+        return {
+          vu: { id: 0, iteration, env },
+          sink,
+          signal: root.signal,
+          tZero,
+          defaults: baseDefaults,
+          cookieJar: createCookieJar(),
+          phase,
+        }
+      }
+
+      if (mod.epilogue) {
+        const epi = mod.epilogue
+        await root.resource(true, async () => {
+          try {
+            await withRuntime(mkHookCtx("epilogue", -2), async () => epi(env, root.signal))
+          } catch (err) {
+            process.stderr.write(
+              `epilogue threw: ${(err as Error)?.message ?? String(err)}\n`,
+            )
+          }
+        })
+      }
+
+      if (mod.prologue) {
+        const pro = mod.prologue
+        await withRuntime(mkHookCtx("prologue", -1), async () => pro(env, root.signal))
+      }
 
       if (!opts.quiet) {
         root.spawn(() => runProgress(stats, root.signal, opts.durationMs))
