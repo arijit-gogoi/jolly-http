@@ -6,7 +6,17 @@ export interface VuContext {
   env: Readonly<Record<string, string>>
 }
 
-export type WorkflowFn = (vu: VuContext, signal: AbortSignal) => Promise<unknown> | unknown
+/**
+ * The default-exported workflow function. v0.5+ accepts an optional third
+ * argument `ctx` — whatever `before` returned (or `{}` if there's no `before`
+ * or `before` returned undefined). Existing 2-arg defaults are still valid;
+ * the third arg is additive.
+ */
+export type WorkflowFn = (
+  vu: VuContext,
+  signal: AbortSignal,
+  ctx?: unknown,
+) => Promise<unknown> | unknown
 
 /**
  * Hook function called once-per-process around the iteration loop.
@@ -24,8 +34,36 @@ export type HookFn = (
   signal: AbortSignal,
 ) => Promise<unknown> | unknown
 
+/**
+ * Per-iteration setup hook (v0.5+). Runs before `default` for every iteration.
+ * Returns a context object passed as the third arg to `default` and `after`.
+ * Returning `undefined` results in `{}` being threaded.
+ */
+export type BeforeFn = (
+  vu: VuContext,
+  signal: AbortSignal,
+) => Promise<unknown> | unknown
+
+/**
+ * Per-iteration teardown hook (v0.5+). Runs after `default` for every iteration.
+ * ALWAYS fires — including when `before` threw, when `default` threw, and on
+ * abort/Ctrl-C. Receives the same context object `before` returned (or `{}`).
+ * Implemented via scope.resource registered before `before` runs, so cleanup
+ * is guaranteed by structural concurrency.
+ */
+export type AfterFn = (
+  vu: VuContext,
+  signal: AbortSignal,
+  ctx: unknown,
+) => Promise<void> | void
+
 /** Phase label for samples emitted by each runtime context. */
-export type SamplePhase = "prologue" | "iteration" | "epilogue"
+export type SamplePhase =
+  | "prologue"
+  | "iteration"
+  | "epilogue"
+  | "before"
+  | "after"
 
 export interface SampleSuccess {
   ok: true
@@ -58,7 +96,27 @@ export interface SampleError {
   ts: string
 }
 
-export type Sample = SampleSuccess | SampleError
+/**
+ * Workflow-emitted event (v0.5+) via `log.event(name, data?)`. Lives in the
+ * same NDJSON stream as request samples so downstream tooling (jq, dashboards)
+ * doesn't need to merge two streams. Discriminator: `"event" in sample`.
+ *
+ * `ok: true` so success-shape consumers don't trip when destructuring; the
+ * `event` field's presence is the actual discriminator. Fields method/url/
+ * status/size are absent.
+ */
+export interface SampleEvent {
+  ok: true
+  t: number
+  vu: number
+  iteration: number
+  phase?: SamplePhase
+  event: string
+  data?: unknown
+  ts: string
+}
+
+export type Sample = SampleSuccess | SampleError | SampleEvent
 
 export interface SampleSink {
   write(s: Sample): void

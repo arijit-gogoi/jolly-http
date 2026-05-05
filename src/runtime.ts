@@ -102,6 +102,38 @@ export function emitSample(s: Sample): void {
   currentContext().sink.write(s)
 }
 
+/**
+ * Workflow-callable structured logging (v0.5+). Writes a `SampleEvent` line
+ * to the same NDJSON sink as request samples. Mid-test trace points survive
+ * concurrent VUs without garbling because the sink already serializes writes
+ * line-by-line.
+ *
+ *   log.event("checkout.started")
+ *   log.event("autosave.flushed", { postId, attempt: 3 })
+ *
+ * `data` may be any JSON-serializable value. The runtime stamps `vu`,
+ * `iteration`, `t`, `ts`, and `phase` (if set) onto the line — same envelope
+ * as request samples, so the same downstream tools read both.
+ *
+ * Calling outside a workflow throws the standard runtime-outside-workflow error.
+ */
+export const log = {
+  event(name: string, data?: unknown): void {
+    const ctx = currentContext()
+    const t = (performance.now() - ctx.tZero) / 1_000
+    ctx.sink.write({
+      ok: true,
+      t,
+      vu: ctx.vu.id,
+      iteration: ctx.vu.iteration,
+      ...(ctx.phase ? { phase: ctx.phase } : {}),
+      event: name,
+      ...(data !== undefined ? { data } : {}),
+      ts: new Date().toISOString(),
+    })
+  },
+}
+
 export function assert(cond: unknown, message?: string): asserts cond {
   if (cond) return
   throw new AssertionError(message ?? "assertion failed", tryCurrentContext()?.lastResponse)

@@ -7,7 +7,7 @@ import { createSampleSink } from "./output.js"
 import { createCookieJar, loadCookieJar, saveCookieJar, cookieJarPath } from "./cookies.js"
 import { createHarRecorder, saveHar, harPath, loadHarReplay } from "./har.js"
 import { loadEnvFile, readEnvKeys } from "./dotenv.js"
-import type { HookFn, RunOptions, RunResult, WorkflowFn } from "./types.js"
+import type { AfterFn, BeforeFn, HookFn, RunOptions, RunResult, WorkflowFn } from "./types.js"
 
 /**
  * Resolve env file paths into a list of parsed `.env` records, in order
@@ -58,13 +58,21 @@ export function validateRequiredEnv(
 
 /**
  * Workflow module shape — default export plus optional named hooks.
- * `prologue` runs once before any iteration; `epilogue` runs once after all
- * iterations OR on abort/Ctrl-C OR when prologue threw (LIFO via scope.resource).
+ *
+ * Two tiers of hooks:
+ *  - Process-level: `prologue` / `epilogue` run once around the entire run.
+ *  - Per-iteration (v0.5+): `before` / `after` run for every iteration.
+ *
+ * `epilogue` and `after` are guaranteed to run even when their respective
+ * setup phase threw (via scope.resource registered before the setup phase
+ * is invoked).
  */
 export interface LoadedWorkflow {
   default: WorkflowFn
   prologue?: HookFn
   epilogue?: HookFn
+  before?: BeforeFn
+  after?: AfterFn
 }
 
 export async function loadWorkflow(path: string): Promise<WorkflowFn> {
@@ -86,23 +94,35 @@ export async function loadWorkflowModule(path: string): Promise<LoadedWorkflow> 
   if (typeof fn !== "function") {
     throw new Error(`workflow ${path}: default export must be a function, got ${typeof fn}`)
   }
-  if ((fn as Function).length > 2) {
+  // Default takes (vu, signal, ctx?) — third arg is the per-iteration ctx
+  // object (v0.5+). Anything beyond 3 is suspicious.
+  if ((fn as Function).length > 3) {
     process.stderr.write(
-      `warn: workflow ${path}: default export takes ${(fn as Function).length} args (expected: vu, signal)\n`,
+      `warn: workflow ${path}: default export takes ${(fn as Function).length} args (expected: vu, signal, ctx?)\n`,
     )
   }
   const prologue = mod.prologue
   const epilogue = mod.epilogue
+  const before = mod.before
+  const after = mod.after
   if (prologue !== undefined && typeof prologue !== "function") {
     throw new Error(`workflow ${path}: prologue must be a function, got ${typeof prologue}`)
   }
   if (epilogue !== undefined && typeof epilogue !== "function") {
     throw new Error(`workflow ${path}: epilogue must be a function, got ${typeof epilogue}`)
   }
+  if (before !== undefined && typeof before !== "function") {
+    throw new Error(`workflow ${path}: before must be a function, got ${typeof before}`)
+  }
+  if (after !== undefined && typeof after !== "function") {
+    throw new Error(`workflow ${path}: after must be a function, got ${typeof after}`)
+  }
   return {
     default: fn as WorkflowFn,
     prologue: prologue as HookFn | undefined,
     epilogue: epilogue as HookFn | undefined,
+    before: before as BeforeFn | undefined,
+    after: after as AfterFn | undefined,
   }
 }
 
@@ -121,12 +141,16 @@ export async function runWorkflow(opts: RunOptions): Promise<RunResult> {
   return runWorkflowFn(mod.default, opts, {
     prologue: mod.prologue,
     epilogue: mod.epilogue,
+    before: mod.before,
+    after: mod.after,
   })
 }
 
 export interface WorkflowHooks {
   prologue?: HookFn
   epilogue?: HookFn
+  before?: BeforeFn
+  after?: AfterFn
 }
 
 export async function runWorkflowFn(
@@ -178,7 +202,7 @@ export async function runWorkflowFn(
         )
       : createCookieJar()
     const harRecorder = opts.harDir
-      ? await s.resource(createHarRecorder("0.4.0"), r => {
+      ? await s.resource(createHarRecorder("0.5.0"), r => {
           saveHar(r, harPath(opts.harDir!, 0))
         })
       : undefined
@@ -191,20 +215,28 @@ export async function runWorkflowFn(
       insecure: opts.insecure,
     }
 
-    // Build a phase-tagged context. Each phase (prologue, iteration, epilogue)
-    // gets its own context instance — separate lastResponse, separate phase
-    // tag stamped onto samples. The iteration phase OMITS the phase tag (per
-    // SPEC §4 — additive optional field, samples without it default to
-    // "iteration"). Prologue/epilogue stamp the tag explicitly. Iteration uses
-    // sentinel ids on vu.iteration so downstream consumers reading old-shape
-    // NDJSON can still distinguish.
+    // Build a phase-tagged context. Each phase (prologue, before, iteration,
+    // after, epilogue) gets its own context instance — separate lastResponse,
+    // separate phase tag stamped onto samples. The iteration phase OMITS the
+    // phase tag (per SPEC §4 — additive optional field, samples without it
+    // default to "iteration"). Other phases stamp the tag explicitly.
+    //
+    // Cookie jar SHARED across phases within the same run: a login in
+    // prologue/before is visible to default; after can issue authenticated
+    // DELETE. lastResponse is per-context (a failed assert in `after` doesn't
+    // surface a request `before` made — unique scratch slot per phase ctx).
+    //
+    // vu.iteration sentinels: -1 prologue, -2 epilogue (process-level).
+    // before/after carry the REAL iteration index; the phase tag is the
+    // discriminator for those.
     const mkCtx = (
-      phase: "prologue" | "iteration" | "epilogue",
+      phase: "prologue" | "iteration" | "epilogue" | "before" | "after",
       iteration: number,
+      sig: AbortSignal = s.signal,
     ): RuntimeContext => ({
       vu: { id: 0, iteration, env },
       sink: wrappedSink,
-      signal: s.signal,
+      signal: sig,
       tZero,
       defaults: baseDefaults,
       cookieJar,
@@ -240,8 +272,46 @@ export async function runWorkflowFn(
       await withRuntime(mkCtx("prologue", -1), async () => pro(env, s.signal))
     }
 
-    const iterCtx = mkCtx("iteration", 0)
-    return withRuntime(iterCtx, async () => fn(iterCtx.vu, s.signal))
+    // Per-iteration scope. Nested below the run scope so before/after wrap
+    // the default function symmetrically with prologue/epilogue at the outer
+    // level. Single-run mode runs ONE iteration (iteration index 0); load
+    // mode does the same wiring per VU per iteration in load.ts.
+    //
+    // `after` is registered as a resource on the iteration scope BEFORE
+    // `before` runs — same LIFO trick as epilogue. If before throws, the
+    // iteration scope unwinds, the resource fires, and after still runs.
+    // The userCtx ref captures the live value `before` returned (closure),
+    // so even when default throws mid-iteration, after sees the populated ctx.
+    return scope({ signal: s.signal }, async iterScope => {
+      const iterCtx = mkCtx("iteration", 0, iterScope.signal)
+      let userCtx: unknown = {}
+
+      if (hooks.after) {
+        const aft = hooks.after
+        await iterScope.resource(true, async () => {
+          try {
+            await withRuntime(mkCtx("after", 0, iterScope.signal), async () =>
+              aft(iterCtx.vu, iterScope.signal, userCtx),
+            )
+          } catch (err) {
+            if (isStructuralCancellation(err) || s.signal.aborted) return
+            process.stderr.write(
+              `after threw: ${(err as Error)?.message ?? String(err)}\n`,
+            )
+          }
+        })
+      }
+
+      if (hooks.before) {
+        const bef = hooks.before
+        const ret = await withRuntime(mkCtx("before", 0, iterScope.signal), async () =>
+          bef(iterCtx.vu, iterScope.signal),
+        )
+        if (ret !== undefined) userCtx = ret
+      }
+
+      return withRuntime(iterCtx, async () => fn(iterCtx.vu, iterScope.signal, userCtx))
+    })
   }).then(
     value => ({ ok: true as const, value }),
     error => ({ ok: false as const, error }),

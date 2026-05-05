@@ -1,8 +1,8 @@
-export const VERSION = "0.4.0"
+export const VERSION = "0.5.0"
 
 export { request, performRequest } from "./request.js"
 export { parseDotenv, readEnvKeys, loadEnvFile } from "./dotenv.js"
-export { assert, AssertionError, env, sleep } from "./runtime.js"
+export { assert, AssertionError, env, sleep, log } from "./runtime.js"
 export { runWorkflow, runWorkflowFn, loadWorkflow, loadWorkflowModule } from "./run.js"
 export type { LoadedWorkflow, WorkflowHooks } from "./run.js"
 export { runAdhoc } from "./adhoc.js"
@@ -22,6 +22,7 @@ export type {
   Sample,
   SampleSuccess,
   SampleError,
+  SampleEvent,
   SampleSink,
   RunOptions,
   LoadOptions,

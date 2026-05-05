@@ -4,7 +4,7 @@ import { createSampleSink } from "./output.js"
 import { loadWorkflowModule, resolveEnvLayers, validateRequiredEnv } from "./run.js"
 import { createCookieJar, loadCookieJar, saveCookieJar, cookieJarPath, type CookieJar } from "./cookies.js"
 import { createHarRecorder, saveHar, harPath, loadHarReplay, type HarRecorder, type HarReplayer } from "./har.js"
-import type { LoadOptions, Sample, SampleSink, VuContext, WorkflowFn } from "./types.js"
+import type { AfterFn, BeforeFn, LoadOptions, Sample, SampleSink, VuContext, WorkflowFn } from "./types.js"
 
 /**
  * Summary stats computed across all per-request samples observed during the
@@ -57,7 +57,7 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
   const deadline = Date.now() + opts.durationMs
   const completed = { n: 0 }
   const rateLimiter = opts.rps !== undefined ? new RateLimiter(opts.rps) : undefined
-  const userAgent = opts.userAgent ?? `jolly-http/0.4.0`
+  const userAgent = opts.userAgent ?? `jolly-http/0.5.0`
 
   let endedBy: EndedBy = "drained"
   let failure: unknown
@@ -142,7 +142,7 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
               )
             : createCookieJar()
           const harRecorder = opts.harDir
-            ? await pool.resource(createHarRecorder("0.4.0"), r => {
+            ? await pool.resource(createHarRecorder("0.5.0"), r => {
                 saveHar(r, harPath(opts.harDir!, i))
               })
             : undefined
@@ -155,6 +155,8 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
             runVu({
               vuId: i,
               fn,
+              before: mod.before,
+              after: mod.after,
               env,
               sink,
               signal: pool.signal,
@@ -207,6 +209,8 @@ export async function runLoad(opts: LoadOptions): Promise<LoadResult> {
 interface VuCtx {
   vuId: number
   fn: WorkflowFn
+  before?: BeforeFn
+  after?: AfterFn
   env: Readonly<Record<string, string>>
   sink: SampleSink
   signal: AbortSignal
@@ -252,47 +256,91 @@ async function oneIteration(ctx: VuCtx, iteration: number): Promise<Sample | und
   const started = performance.now()
   const ts = new Date().toISOString()
   const vu: VuContext = { id: ctx.vuId, iteration, env: ctx.env }
-  const runtimeCtx: RuntimeContext = {
+
+  // Phase-tagged context factory. Cookie jar / HAR shared across phases of
+  // the same iteration (login in `before` is visible to default; after can
+  // issue authenticated DELETE). lastResponse is per-context (separate slot).
+  const mkPhaseCtx = (
+    phase: "before" | "iteration" | "after",
+    sig: AbortSignal,
+  ): RuntimeContext => ({
     vu,
     sink: ctx.sink,
-    signal: ctx.signal,
+    signal: sig,
     tZero: ctx.tZero,
     defaults: ctx.defaults,
     cookieJar: ctx.cookieJar,
     harRecorder: ctx.harRecorder,
     harReplay: ctx.harReplay,
-  }
+    ...(phase === "iteration" ? {} : { phase }),
+  })
 
-  try {
-    await withRuntime(runtimeCtx, async () => ctx.fn(vu, ctx.signal))
-    return {
-      ok: true,
-      t,
-      vu: ctx.vuId,
-      iteration,
-      method: "",
-      url: "",
-      duration_ms: performance.now() - started,
-      status: 0,
-      size: 0,
-      ts,
+  // Per-iteration scope: `after` registered as resource BEFORE `before` runs
+  // so it always fires (before threw, default threw, signal aborted) — same
+  // LIFO trick as v0.4 epilogue. userCtx is captured by closure so after
+  // sees what before returned, even when default throws mid-iteration.
+  return await scope({ signal: ctx.signal }, async iterScope => {
+    let userCtx: unknown = {}
+
+    if (ctx.after) {
+      const aft = ctx.after
+      await iterScope.resource(true, async () => {
+        try {
+          await withRuntime(mkPhaseCtx("after", iterScope.signal), async () =>
+            aft(vu, iterScope.signal, userCtx),
+          )
+        } catch (err) {
+          // Structural cancellation (deadline, abort) propagates through
+          // request.* inside the hook. That's not a hook bug — the run is
+          // unwinding. Stay silent on it; surface only real exceptions.
+          if (isStructuralCancellation(err) || ctx.signal.aborted) return
+          process.stderr.write(
+            `after threw: ${(err as Error)?.message ?? String(err)}\n`,
+          )
+        }
+      })
     }
-  } catch (err) {
-    if (ctx.signal.aborted) return undefined
-    const e = err as { name?: string; message?: string }
-    return {
-      ok: false,
-      t,
-      vu: ctx.vuId,
-      iteration,
-      method: "",
-      url: "",
-      duration_ms: performance.now() - started,
-      error: e?.name ?? "Error",
-      message: e?.message ?? String(err),
-      ts,
+
+    try {
+      if (ctx.before) {
+        const bef = ctx.before
+        const ret = await withRuntime(mkPhaseCtx("before", iterScope.signal), async () =>
+          bef(vu, iterScope.signal),
+        )
+        if (ret !== undefined) userCtx = ret
+      }
+      await withRuntime(mkPhaseCtx("iteration", iterScope.signal), async () =>
+        ctx.fn(vu, iterScope.signal, userCtx),
+      )
+      return {
+        ok: true,
+        t,
+        vu: ctx.vuId,
+        iteration,
+        method: "",
+        url: "",
+        duration_ms: performance.now() - started,
+        status: 0,
+        size: 0,
+        ts,
+      } as Sample
+    } catch (err) {
+      if (ctx.signal.aborted || iterScope.signal.aborted) return undefined
+      const e = err as { name?: string; message?: string }
+      return {
+        ok: false,
+        t,
+        vu: ctx.vuId,
+        iteration,
+        method: "",
+        url: "",
+        duration_ms: performance.now() - started,
+        error: e?.name ?? "Error",
+        message: e?.message ?? String(err),
+        ts,
+      } as Sample
     }
-  }
+  })
 }
 
 // ---------------- Stats + percentiles ----------------
@@ -369,7 +417,17 @@ export class Stats {
     this.warmupEndMs = this.startMs + warmupMs
   }
 
+  /**
+   * Records an iteration outcome (success or error) for stats roll-up.
+   *
+   * SampleEvent (workflow-emitted via log.event) is NOT an iteration outcome —
+   * it represents a workflow trace point that lives in the NDJSON stream but
+   * has no duration_ms / status / error. The "event" in sample guard skips
+   * those defensively. Today nothing routes events through onOutcome; this
+   * documents the invariant and protects against future refactors.
+   */
   push(sample: Sample): void {
+    if ("event" in sample) return
     if (performance.now() < this.warmupEndMs) return
     this._total++
     this.latency.push(sample.duration_ms)

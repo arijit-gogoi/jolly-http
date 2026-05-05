@@ -84,4 +84,68 @@ export default async function (vu, signal) {
     // should all have status 500 (non-2xx is not an error at request level).
     expect(r.samples).toBeGreaterThan(0)
   }, 10_000)
+
+  describe("per-iteration before / after hooks (v0.5+)", () => {
+    it("before/after fire per iteration in load mode", async () => {
+      const out = join(tmp, "load-iter-counts.ndjson")
+      if (existsSync(out)) rmSync(out)
+      const path = writeWorkflow(
+        "load-iter-counts.mjs",
+        `import { request } from "jolly-http"
+export async function before(vu, signal) {
+  await request.GET("${baseUrl}/x", { signal })
+}
+export default async function (vu, signal, ctx) {
+  await request.GET("${baseUrl}/x", { signal })
+}
+export async function after(vu, signal, ctx) {
+  await request.GET("${baseUrl}/x", { signal })
+}
+`,
+      )
+      const r = await runLoad({
+        workflowPath: path,
+        concurrency: 2,
+        durationMs: 200,
+        quiet: true,
+        outPath: out,
+      })
+      expect(r.endedBy).toBe("drained")
+      const lines = readFileSync(out, "utf8").trim().split("\n")
+      const samples = lines.map(l => JSON.parse(l))
+      const beforeCount = samples.filter(s => s.phase === "before").length
+      const afterCount = samples.filter(s => s.phase === "after").length
+      const iterCount = samples.filter(s => s.phase === undefined).length
+      // Per-iteration: each iteration emits 1 before + 1 default + 1 after.
+      // Across all VUs, before/after counts must equal default count.
+      expect(beforeCount).toBe(iterCount)
+      expect(afterCount).toBe(iterCount)
+      expect(iterCount).toBeGreaterThan(0)
+    }, 10_000)
+
+    it("after still runs per iteration when default throws", async () => {
+      const path = writeWorkflow(
+        "load-iter-after-on-throw.mjs",
+        `let afterRuns = 0
+export default async function () {
+  throw new Error("iteration boom")
+}
+export async function after() {
+  afterRuns++
+}
+export function _runs() { return afterRuns }
+`,
+      )
+      const r = await runLoad({
+        workflowPath: path,
+        concurrency: 2,
+        durationMs: 150,
+        quiet: true,
+      })
+      expect(r.snapshot.errors).toBeGreaterThan(0)
+      const mod = await import(/* @vite-ignore */ "file://" + path.replace(/\\/g, "/"))
+      // after should run for every failed iteration
+      expect(mod._runs()).toBeGreaterThanOrEqual(r.snapshot.errors)
+    }, 10_000)
+  })
 })

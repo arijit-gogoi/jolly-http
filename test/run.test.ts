@@ -561,4 +561,207 @@ export default async function (vu, signal) {
     expect(r2.ok).toBe(true)
     expect((r2.value as { status: number }).status).toBe(200)
   })
+
+  describe("per-iteration before / after hooks (v0.5+)", () => {
+    it("happy path: before returns ctx → default mutates → after reads", async () => {
+      const path = writeWorkflow(
+        "iter-happy.mjs",
+        `let captured
+export async function before(vu, signal) {
+  return { items: [] }
+}
+export default async function (vu, signal, ctx) {
+  ctx.items.push("from-default")
+}
+export async function after(vu, signal, ctx) {
+  captured = ctx
+}
+export function _captured() { return captured }
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      expect(r.ok).toBe(true)
+      const mod = await import(/* @vite-ignore */ "file://" + path.replace(/\\/g, "/"))
+      expect(mod._captured()).toEqual({ items: ["from-default"] })
+    })
+
+    it("after runs when before threw — ctx is {}", async () => {
+      const path = writeWorkflow(
+        "iter-before-throws.mjs",
+        `let beforeRan = false, defaultRan = false, afterRan = false, afterCtx
+export async function before() {
+  beforeRan = true
+  throw new Error("before boom")
+}
+export default async function () {
+  defaultRan = true
+}
+export async function after(vu, signal, ctx) {
+  afterRan = true
+  afterCtx = ctx
+}
+export function _flags() { return { beforeRan, defaultRan, afterRan, afterCtx } }
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      const mod = await import(/* @vite-ignore */ "file://" + path.replace(/\\/g, "/"))
+      const f = mod._flags()
+      expect(f.beforeRan).toBe(true)
+      expect(f.defaultRan).toBe(false)
+      expect(f.afterRan).toBe(true)
+      expect(f.afterCtx).toEqual({})
+      expect(r.ok).toBe(false)
+      expect((r.error as Error).message).toMatch(/before boom/)
+    })
+
+    it("after receives ctx when default threw mid-iteration (DISCRIMINATING)", async () => {
+      // The discriminating test: proves the resource captured the LIVE ctx ref,
+      // not a stale snapshot from when after was registered.
+      const path = writeWorkflow(
+        "iter-default-throws-with-ctx.mjs",
+        `let receivedCtx
+export async function before() {
+  return { marker: "set", populated: true }
+}
+export default async function (vu, signal, ctx) {
+  // ctx populated by before; default throws AFTER it's been threaded
+  throw new Error("default boom")
+}
+export async function after(vu, signal, ctx) {
+  receivedCtx = ctx
+}
+export function _ctx() { return receivedCtx }
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      const mod = await import(/* @vite-ignore */ "file://" + path.replace(/\\/g, "/"))
+      expect(mod._ctx()).toEqual({ marker: "set", populated: true })
+      expect(r.ok).toBe(false)
+      expect((r.error as Error).message).toMatch(/default boom/)
+    })
+
+    it("3-arg default does NOT trip the arity warning", async () => {
+      // Capture stderr writes during runWorkflow.
+      const origWrite = process.stderr.write.bind(process.stderr)
+      const captured: string[] = []
+      process.stderr.write = ((chunk: any, ..._rest: any[]) => {
+        captured.push(String(chunk))
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const path = writeWorkflow(
+          "iter-arity-3.mjs",
+          `export default async function (vu, signal, ctx) {
+  return { argc: 3 }
+}
+`,
+        )
+        const r = await runWorkflow({ workflowPath: path })
+        expect(r.ok).toBe(true)
+      } finally {
+        process.stderr.write = origWrite
+      }
+      const arityWarn = captured.find(s => /takes \d+ args/.test(s))
+      expect(arityWarn).toBeUndefined()
+    })
+
+    it("4-arg default DOES trip the arity warning", async () => {
+      const origWrite = process.stderr.write.bind(process.stderr)
+      const captured: string[] = []
+      process.stderr.write = ((chunk: any, ..._rest: any[]) => {
+        captured.push(String(chunk))
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const path = writeWorkflow(
+          "iter-arity-4.mjs",
+          `export default async function (vu, signal, ctx, extra) { }
+`,
+        )
+        await runWorkflow({ workflowPath: path })
+      } finally {
+        process.stderr.write = origWrite
+      }
+      const arityWarn = captured.find(s => /takes 4 args/.test(s))
+      expect(arityWarn).toBeDefined()
+    })
+
+    it("cookie set in before is sent in default and after (jar shared across phases)", async () => {
+      const path = writeWorkflow(
+        "iter-cookie-shared.mjs",
+        `import { request, assert } from "jolly-http"
+let defaultStatus, afterStatus
+export async function before(vu, signal) {
+  await request.GET("${baseUrl}/set-cookie", { signal })
+}
+export default async function (vu, signal) {
+  const r = await request.GET("${baseUrl}/needs-cookie", { signal })
+  defaultStatus = r.status
+}
+export async function after(vu, signal, ctx) {
+  const r = await request.GET("${baseUrl}/needs-cookie", { signal })
+  afterStatus = r.status
+}
+export function _statuses() { return { defaultStatus, afterStatus } }
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      expect(r.ok).toBe(true)
+      const mod = await import(/* @vite-ignore */ "file://" + path.replace(/\\/g, "/"))
+      const s = mod._statuses()
+      expect(s.defaultStatus).toBe(200)
+      expect(s.afterStatus).toBe(200)
+    })
+
+    it("samples emitted from before/after carry phase tags", async () => {
+      const out = join(tmp, "iter-phase.ndjson")
+      if (existsSync(out)) rmSync(out)
+      const path = writeWorkflow(
+        "iter-phase.mjs",
+        `import { request } from "jolly-http"
+export async function before(vu, signal) {
+  await request.GET("${baseUrl}/hello", { signal })
+}
+export default async function (vu, signal, ctx) {
+  await request.GET("${baseUrl}/hello", { signal })
+}
+export async function after(vu, signal, ctx) {
+  await request.GET("${baseUrl}/hello", { signal })
+}
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path, outPath: out })
+      expect(r.ok).toBe(true)
+      const lines = readFileSync(out, "utf8").trim().split("\n")
+      expect(lines).toHaveLength(3)
+      const samples = lines.map(l => JSON.parse(l))
+      expect(samples[0].phase).toBe("before")
+      expect(samples[1].phase).toBeUndefined()  // iteration omits phase
+      expect(samples[2].phase).toBe("after")
+    })
+
+    it("rejects non-function before", async () => {
+      const path = writeWorkflow(
+        "iter-bad-before.mjs",
+        `export const before = 42
+export default async function () {}
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      expect(r.ok).toBe(false)
+      expect((r.error as Error).message).toMatch(/before must be a function/)
+    })
+
+    it("rejects non-function after", async () => {
+      const path = writeWorkflow(
+        "iter-bad-after.mjs",
+        `export const after = "no"
+export default async function () {}
+`,
+      )
+      const r = await runWorkflow({ workflowPath: path })
+      expect(r.ok).toBe(false)
+      expect((r.error as Error).message).toMatch(/after must be a function/)
+    })
+  })
 })

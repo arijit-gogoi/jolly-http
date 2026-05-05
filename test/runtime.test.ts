@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest"
-import { AssertionError, assert, buildEnv, env, withRuntime, currentContext, tryCurrentContext, type RuntimeContext } from "../src/runtime.js"
-import type { SampleSink } from "../src/types.js"
+import { AssertionError, assert, buildEnv, env, log, withRuntime, currentContext, tryCurrentContext, type RuntimeContext } from "../src/runtime.js"
+import type { Sample, SampleSink } from "../src/types.js"
 
 const nullSink: SampleSink = { write() {}, async close() {} }
 
@@ -168,5 +168,80 @@ describe("withRuntime / currentContext", () => {
   })
   it("tryCurrentContext returns undefined outside", () => {
     expect(tryCurrentContext()).toBeUndefined()
+  })
+})
+
+describe("log.event", () => {
+  function collector(): { samples: Sample[]; sink: SampleSink } {
+    const samples: Sample[] = []
+    return {
+      samples,
+      sink: { write(s) { samples.push(s) }, async close() {} },
+    }
+  }
+
+  it("writes one NDJSON line with event field, no method/url/status", async () => {
+    const { sink, samples } = collector()
+    await withRuntime(mkCtx({ sink }), async () => {
+      log.event("checkout.started")
+    })
+    expect(samples).toHaveLength(1)
+    const s = samples[0] as any
+    expect(s.event).toBe("checkout.started")
+    expect(s.method).toBeUndefined()
+    expect(s.url).toBeUndefined()
+    expect(s.status).toBeUndefined()
+    expect(s.ok).toBe(true)
+    expect(typeof s.t).toBe("number")
+    expect(typeof s.ts).toBe("string")
+  })
+
+  it("includes data when provided", async () => {
+    const { sink, samples } = collector()
+    await withRuntime(mkCtx({ sink }), async () => {
+      log.event("autosave.flushed", { postId: 7, attempt: 3 })
+    })
+    expect(samples).toHaveLength(1)
+    expect((samples[0] as any).data).toEqual({ postId: 7, attempt: 3 })
+  })
+
+  it("omits data when not provided", async () => {
+    const { sink, samples } = collector()
+    await withRuntime(mkCtx({ sink }), async () => {
+      log.event("checkpoint")
+    })
+    expect("data" in samples[0]).toBe(false)
+  })
+
+  it("carries phase tag when context has phase set", async () => {
+    const { sink, samples } = collector()
+    await withRuntime(mkCtx({ sink, phase: "prologue", vu: { id: 0, iteration: -1, env: Object.freeze({}) } }), async () => {
+      log.event("prologue.done")
+    })
+    expect(samples[0].phase).toBe("prologue")
+  })
+
+  it("omits phase tag when context has no phase (iteration-default)", async () => {
+    const { sink, samples } = collector()
+    await withRuntime(mkCtx({ sink }), async () => {
+      log.event("step1")
+    })
+    expect("phase" in samples[0]).toBe(false)
+  })
+
+  it("throws outside a workflow", () => {
+    expect(() => log.event("x")).toThrow(/can only be used from inside a workflow function/)
+  })
+
+  it("vu and iteration come from runtime context", async () => {
+    const { sink, samples } = collector()
+    await withRuntime(
+      mkCtx({ sink, vu: { id: 7, iteration: 3, env: Object.freeze({}) } }),
+      async () => {
+        log.event("at-step")
+      },
+    )
+    expect(samples[0].vu).toBe(7)
+    expect(samples[0].iteration).toBe(3)
   })
 })
