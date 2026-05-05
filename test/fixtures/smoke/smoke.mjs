@@ -1,5 +1,8 @@
-// Three-mode smoke for v0.4. Run via: node test/fixtures/smoke/smoke.mjs
+// Five-section smoke for v0.5. Run via: node test/fixtures/smoke/smoke.mjs
 // Verifies the just-built dist/cli.js end-to-end against an in-process server.
+// Sections 1-3: ad-hoc / single-run / load (carryover from v0.4).
+// Sections 4-5: v0.5 — per-method redirect default, before/after hooks,
+//               log.event NDJSON shape.
 import { spawn } from "node:child_process"
 import { createServer } from "node:http"
 import { writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "node:fs"
@@ -55,6 +58,18 @@ const server = createServer((req, res) => {
       return
     }
   }
+  if (url === "/r303") {
+    res.statusCode = 303
+    res.setHeader("location", "/landed")
+    res.end("see other")
+    return
+  }
+  if (url === "/landed") {
+    res.statusCode = 200
+    res.setHeader("content-type", "application/json")
+    res.end(JSON.stringify({ landed: true, method: req.method }))
+    return
+  }
   res.statusCode = 404
   res.end()
 })
@@ -98,7 +113,7 @@ try {
   // ─────────────────────────────────────────────────────────────────────────
   // Mode 1: ad-hoc GET
   // ─────────────────────────────────────────────────────────────────────────
-  console.log("\n[1/3] ad-hoc GET")
+  console.log("\n[1/5] ad-hoc GET")
   {
     const r = await runCli(["GET", `${base}/hello`, "-q"])
     check("ad-hoc exit 0", r.code === 0, `code=${r.code} stderr=${r.stderr.slice(0, 200)}`)
@@ -107,7 +122,7 @@ try {
   // ─────────────────────────────────────────────────────────────────────────
   // Mode 2: single-run with prologue/epilogue + cookie default flip
   // ─────────────────────────────────────────────────────────────────────────
-  console.log("\n[2/3] single-run with hooks + cookie default flip")
+  console.log("\n[2/5] single-run with hooks + cookie default flip")
   {
     const flow = join(tmp, "flow.mjs")
     writeFileSync(
@@ -162,7 +177,7 @@ export async function epilogue(env, signal) {
   // ─────────────────────────────────────────────────────────────────────────
   // Mode 3: load with hooks; verify NDJSON phase tags
   // ─────────────────────────────────────────────────────────────────────────
-  console.log("\n[3/3] load with phase-tagged samples")
+  console.log("\n[3/5] load with phase-tagged samples")
   {
     const flow = join(tmp, "loadflow.mjs")
     writeFileSync(
@@ -221,6 +236,83 @@ export async function epilogue(env, signal) {
         "epilogue sample has iteration: -2",
         samples.find(s => s.phase === "epilogue")?.iteration === -2,
       )
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Mode 4 (v0.5+): per-method redirect default
+  // ─────────────────────────────────────────────────────────────────────────
+  console.log("\n[4/5] per-method redirect default (v0.5+)")
+  {
+    const flow = join(tmp, "redirect-flow.mjs")
+    writeFileSync(
+      flow,
+      `import { request, assert } from "jolly-http"
+export default async function (vu, signal) {
+  const get = await request.GET("${base}/r303", { signal })
+  assert(get.status === 200, "GET should follow 303 → 200, got " + get.status)
+  const post = await request.POST("${base}/r303", { json: {}, signal })
+  assert(post.status === 303, "POST should stop at 303, got " + post.status)
+  const followed = await request.POST("${base}/r303", { json: {}, redirect: "follow", signal })
+  assert(followed.status === 200, "POST with redirect:follow override should follow, got " + followed.status)
+  return { ok: true }
+}
+`,
+      "utf8",
+    )
+    const r = await runCli(["run", flow, "-q"])
+    check("redirect smoke exit 0", r.code === 0, `code=${r.code} stderr=${r.stderr.slice(0, 300)}`)
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Mode 5 (v0.5+): per-iteration before/after + log.event
+  // ─────────────────────────────────────────────────────────────────────────
+  console.log("\n[5/5] per-iteration hooks + log.event (v0.5+)")
+  {
+    const flow = join(tmp, "iter-hooks.mjs")
+    writeFileSync(
+      flow,
+      `import { request, log } from "jolly-http"
+export async function before(vu, signal) {
+  log.event("before.start", { vu: vu.id })
+  return { items: [] }
+}
+export default async function (vu, signal, ctx) {
+  ctx.items.push("from-default")
+  log.event("default.mid", { count: ctx.items.length })
+  await request.GET("${base}/hello", { signal })
+}
+export async function after(vu, signal, ctx) {
+  log.event("after.cleanup", { itemCount: ctx.items.length })
+}
+`,
+      "utf8",
+    )
+    const out = join(tmp, "iter-samples.ndjson")
+    if (existsSync(out)) rmSync(out)
+    const r = await runCli(["run", flow, "-c", "2", "-d", "500ms", "--out", out, "-q"])
+    check("load with per-iter hooks exit 0", r.code === 0, `stderr=${r.stderr.slice(0, 300)}`)
+    if (existsSync(out)) {
+      const lines = readFileSync(out, "utf8").trim().split("\n")
+      const samples = lines.map(l => JSON.parse(l))
+      const beforeSamples = samples.filter(s => s.phase === "before")
+      const afterSamples = samples.filter(s => s.phase === "after")
+      const httpIterSamples = samples.filter(s => s.method === "GET" && s.phase === undefined)
+      const beforeEvents = samples.filter(s => s.event === "before.start")
+      const defaultEvents = samples.filter(s => s.event === "default.mid")
+      const afterEvents = samples.filter(s => s.event === "after.cleanup")
+
+      check("got per-iteration before events", beforeEvents.length > 0, `got ${beforeEvents.length}`)
+      check("got per-iteration after events", afterEvents.length > 0, `got ${afterEvents.length}`)
+      check("got log.event from default phase", defaultEvents.length > 0, `got ${defaultEvents.length}`)
+      check(
+        "before/after counts match HTTP iteration count",
+        beforeSamples.length === httpIterSamples.length && afterSamples.length === httpIterSamples.length,
+        `before=${beforeSamples.length} after=${afterSamples.length} httpIter=${httpIterSamples.length}`,
+      )
+      check("before event has data field", beforeEvents[0]?.data !== undefined)
+      check("default event carries no phase tag (iteration-default)", defaultEvents[0]?.phase === undefined)
+      check("after event has phase: 'after'", afterEvents[0]?.phase === "after")
     }
   }
 } finally {

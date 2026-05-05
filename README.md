@@ -112,12 +112,13 @@ If your runtime can't strip types and the npm package's transpile-on-the-fly opt
 ## Workflow API (frozen — permanent public surface)
 
 ```ts
-default export: (vu: VuContext, signal: AbortSignal) => Promise<any>
+default export: (vu: VuContext, signal: AbortSignal, ctx?: unknown) => Promise<any>
+//                                                    ^^^^^^^^^^^^^ v0.5+: whatever before returned
 
 vu:     { id: number, iteration: number, env: Readonly<Record<string,string>> }
 signal: AbortSignal (from the scope — pass to every fetch)
 
-import { request, assert, env, sleep } from "jolly-http"
+import { request, assert, env, sleep, log } from "jolly-http"
 
 request.GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS (url, init) → Response
 
@@ -129,10 +130,13 @@ init: {
   query?: Record<string, string | number | boolean>
   timeout?: string | number     // "5s", 1000
   signal?: AbortSignal          // composed with scope signal
+  redirect?: "follow" | "manual" | "error"  // default: GET/HEAD/OPTIONS = follow,
+                                            //          POST/PUT/PATCH/DELETE = manual (v0.5+)
   cookies?: boolean             // false → opt this request out of the jar
 }
 
 assert(cond, msg?)              // throws AssertionError when falsy
+log.event(name, data?)          // emit a structured trace point to NDJSON (v0.5+)
 env.FOO                         // --env flags + process.env + .env files
 sleep("200ms" | 200)            // signal-aware
 ```
@@ -180,6 +184,69 @@ The contract:
 - **State across hooks** uses module-level `let`. There is no separate state-passing API. Real JS, the wedge.
 - **`request.*` / `assert` / `env` / `sleep` work inside hooks.** They run inside their own runtime context; samples emitted from hooks carry `phase: "prologue"` or `phase: "epilogue"` in the NDJSON output (omitted for iteration samples).
 - **A workflow file with only `prologue`/`epilogue` and no `default` export is invalid** — that's a script, not a workflow.
+
+### Per-iteration setup and teardown (v0.5+)
+
+`prologue`/`epilogue` are once-per-process. For setup that runs **once per iteration** — typical of E2E suites where each iteration creates and tears down its own fixture (test user, draft post, transient row) — use `before` and `after`:
+
+```js
+// flow.mjs
+import { request } from "jolly-http"
+
+export async function before(vu, signal) {
+  // Runs before `default` for every iteration. Returns a context object.
+  const r = await request.POST("/test-users", { json: { vu: vu.id }, signal })
+  const { id, email } = await r.json()
+  return { userId: id, createdEmails: [email] }
+}
+
+export default async function (vu, signal, ctx) {
+  // ctx is what before returned; mutate freely.
+  ctx.createdEmails.push(`alt-${vu.iteration}@example.com`)
+  await request.POST("/some-flow", { json: { user: ctx.userId }, signal })
+}
+
+export async function after(vu, signal, ctx) {
+  // ALWAYS runs — including when before or default threw, or on Ctrl-C.
+  for (const email of ctx.createdEmails) {
+    await request.DELETE(`/test-users/${encodeURIComponent(email)}`, { signal })
+  }
+}
+```
+
+The contract:
+
+- **`before` runs before `default`** for every iteration. Returns a context object passed as the third argument to `default` and `after`. Returning `undefined` means `{}` is threaded.
+- **`after` ALWAYS runs.** Including when `before` threw, when `default` threw, on signal abort. This is the iteration-scale equivalent of `epilogue` — implemented as a scope resource registered before `before` runs.
+- **The cookie jar is SHARED** across `before`/`default`/`after` within an iteration. A login in `before` is visible to `default`; `after` can issue authenticated DELETE.
+- **`AssertionError` last-response is ISOLATED per phase.** A failed assert in `after` shows `after`'s last request, not `before`'s.
+- **State within an iteration** flows through the `ctx` object. **State between iterations** is your problem — that's the point of "per-iteration."
+- **Composes with `prologue`/`epilogue`.** Both tiers can coexist: `prologue` → (`before` → `default` → `after`) × N → `epilogue`.
+
+This eliminates the hand-rolled `try/finally { await cleanupUser(email) }` boilerplate that every real E2E suite ends up writing.
+
+### Structured trace points: `log.event` (v0.5+)
+
+Mid-test trace points belong in the same NDJSON stream as request samples — same envelope (`vu`, `iteration`, `t`, `ts`, optional `phase`), parseable with the same tools.
+
+```js
+import { request, log } from "jolly-http"
+
+export default async function (vu, signal) {
+  log.event("checkout.started")
+  await request.POST("/cart/add", { json: {...}, signal })
+  log.event("autosave.flushed", { postId: 7, attempt: 3 })
+}
+```
+
+Each call writes one NDJSON line:
+
+```json
+{"ok":true,"t":0.142,"vu":7,"iteration":0,"event":"checkout.started","ts":"..."}
+{"ok":true,"t":0.250,"vu":7,"iteration":0,"event":"autosave.flushed","data":{"postId":7,"attempt":3},"ts":"..."}
+```
+
+Discriminate events from request samples with `"event" in sample`. They survive 50 concurrent VUs cleanly because the sink already serializes line-by-line.
 
 ## Common options
 
@@ -395,16 +462,21 @@ try {
 
 ### POST returned no error but my assertion on `.status` fails
 
-Default redirect mode is `"follow"`. A `POST` that gets a `303 See Other` (the standard pattern in server-rendered apps — htmx, Rails, Phoenix, Django) silently redirects to the GET, and your code sees the GET's status, not the POST's `303`. To assert on the actual `303`:
+**Fixed in v0.5.** `POST`/`PUT`/`PATCH`/`DELETE` now default to `redirect: "manual"`, so `assert(signup.status === 303)` works against server-rendered apps (htmx, Rails, Phoenix, Django, Axum) without any per-call ceremony. `GET`/`HEAD`/`OPTIONS` still default to `"follow"`. Pass `redirect: "follow"` explicitly to opt back into the old behavior on a per-call basis:
 
 ```js
-const signup = await request.POST(`${env.API}/signup`, {
+const signup = await request.POST(`${env.API}/signup`, { json: { email }, signal })
+assert(signup.status === 303, `expected 303, got ${signup.status}`)
+
+// Want to follow the redirect chain? Opt in per call:
+const browsed = await request.POST(`${env.API}/signup`, {
   json: { email },
-  redirect: "manual",   // ← critical for POST→303 patterns
+  redirect: "follow",   // ← back to the v0.4 default
   signal,
 })
-assert(signup.status === 303, `expected 303, got ${signup.status}`)
 ```
+
+If you're on v0.4 or earlier, every redirect-emitting POST needs `redirect: "manual"` explicitly; the default flip in v0.5 is exactly to remove that ceremony.
 
 ### `jolly-http: request/assert/env/sleep can only be used from inside a workflow function`
 
@@ -446,13 +518,14 @@ In v0.4+, that only happens with `--cookies-resume <dir>` (opt-in cross-run cont
 
 ### Structured logging in load mode
 
-`console.log` works, but in load mode (50+ VUs writing concurrently) lines garble. The recommended pattern:
+**Use `log.event` (v0.5+).** It writes to the same NDJSON stream as request samples, with the same envelope (`vu`, `iteration`, `t`, `ts`, optional `phase`):
 
 ```js
-process.stderr.write(JSON.stringify({ vu: vu.id, event: "step1" }) + "\n")
+import { log } from "jolly-http"
+log.event("step1.done", { recordId: 42 })
 ```
 
-Atomic-write per line, parseable with `jq`, survives concurrent VUs cleanly.
+`console.log` lines garble across concurrent VUs. `process.stderr.write(JSON.stringify(...) + "\n")` works as a fallback on older versions but doesn't merge with the NDJSON output stream. See [Structured trace points](#structured-trace-points-logevent-v05).
 
 ### Assertion failure with no context
 

@@ -113,22 +113,38 @@ export default async function (vu, signal) {
 
 ### Frozen API surface (permanent post-v0.1.0)
 
-- **default export** — `async function (vu, signal) => any`
+- **default export** — `async function (vu, signal, ctx?) => any`. The third `ctx` argument (v0.5+) is whatever `before` returned (or `{}`). Existing 2-arg defaults are still valid; the third arg is additive.
 - **`vu` parameter** — `{ id: number, iteration: number, env: Readonly<Record<string,string>> }`
 - **`signal` parameter** — the scope's `AbortSignal`; thread to every `fetch`/`sleep` that should honor cancellation
 - **`request.GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS(url, init): Promise<Response>`** — `Response` is `globalThis.Response`-shaped (`.status`, `.headers`, `.json()`, `.text()`, `.arrayBuffer()`)
 - **`assert(cond: unknown, msg?: string): void`** — throws `AssertionError` on falsy. When called from inside a workflow, the thrown `AssertionError` auto-includes the most recent request's URL/status/headers/full response body for debugging (v0.4+).
+- **`log.event(name: string, data?: unknown): void`** (v0.5+) — emits a structured trace point as an NDJSON `SampleEvent` line. Carries `vu`, `iteration`, `t`, `ts`, optional `phase`, plus `event` and (if provided) `data`. Lines up alongside request samples in the same NDJSON stream.
 - **`env`** — frozen proxy over `process.env` + `--env` flag overrides
 - **`sleep(ms: number | "30s" | "2m"): Promise<void>`** — signal-aware via runtime context
 
 ### Optional named exports (v0.4+, frozen API addition)
 
-- **`prologue?: async function (env, signal) => any`** — runs once per process before any iteration. Receives the merged `env` and the parent scope's `AbortSignal`. Throws abort the run (default + epilogue still fire — see below). `request.*`, `assert`, `env`, `sleep` all work inside.
+Two tiers of hooks, both optional.
+
+**Process-level (v0.4+)** — run once around the entire run:
+
+- **`prologue?: async function (env, signal) => any`** — runs once per process before any iteration. Receives the merged `env` and the parent scope's `AbortSignal`. Throws abort the run (default + epilogue still fire — see below). `request.*`, `assert`, `env`, `sleep`, `log.event` all work inside.
 - **`epilogue?: async function (env, signal) => any`** — runs once per process after all iterations finish, on abort/Ctrl-C, AND when prologue threw. This matches `jest beforeAll`/`afterAll`, `pytest fixtures`, etc. — partial-setup teardown is the contract. Implemented as a scope resource registered before prologue, so cleanup is guaranteed.
 
-If the workflow file has only `prologue` (no `default`), it's not a workflow — load fails. The `default` export is still required.
+**Per-iteration (v0.5+)** — run for every iteration in load mode (or once in single-run mode):
 
-State-passing between hooks uses module-level `let` bindings (real JS — the wedge). There is no separate state-passing API.
+- **`before?: async function (vu, signal) => any`** — runs before `default` for every iteration. Returns a context object passed as the third argument to `default` and `after`. Returning `undefined` means `{}` is threaded.
+- **`after?: async function (vu, signal, ctx) => void`** — runs after `default` for every iteration. ALWAYS fires — including when `before` threw, when `default` threw, and on abort/Ctrl-C. Receives the same context object `before` returned (or `{}`). Implemented via `scope.resource` registered before `before` runs, so cleanup is guaranteed.
+
+The two tiers compose. `prologue` runs once → `before`/`default`/`after` repeat per iteration → `epilogue` runs once.
+
+**Cookie jar SHARED** across before/default/after within an iteration: a login in `before` is visible to `default`; `after` can issue authenticated DELETE.
+
+**`AssertionError.lastResponse` ISOLATED per phase**: an assertion failure in `after` shows `after`'s last request, not `before`'s.
+
+**State-passing within a single iteration** uses the `ctx` object returned by `before` and threaded through `default` (3rd arg) and `after` (3rd arg). **State-passing between hooks at process level** uses module-level `let` bindings (real JS — the wedge). There is no separate state-passing API.
+
+If the workflow file has only `prologue`/`before`/etc. (no `default`), it's not a workflow — load fails. The `default` export is still required.
 
 ### `request` init options
 
@@ -141,10 +157,25 @@ interface RequestInit {
   query?: Record<string, string | number | boolean>
   timeout?: string | number                // "5s", 1000 — per-request
   signal?: AbortSignal                     // composed with scope signal
-  redirect?: "follow" | "manual" | "error"
+  redirect?: "follow" | "manual" | "error" // see "Default redirect behavior" below
   cookies?: boolean                        // false → opt this request out of the per-VU jar (v0.2+)
 }
 ```
+
+### Default redirect behavior (v0.5+)
+
+`init.redirect` defaults vary by HTTP method:
+
+| Method                   | Default     |
+|--------------------------|-------------|
+| `GET`, `HEAD`, `OPTIONS` | `"follow"`  |
+| `POST`, `PUT`, `PATCH`, `DELETE` | `"manual"` |
+
+**Why per-method.** Server-rendered apps (htmx, Rails, Phoenix, Django, Axum) almost universally respond to mutation requests with a 303 See Other. With `redirect: "follow"`, the workflow silently follows to the rendered page and `res.status` reads `200` — the framework's actual response (the 303) is invisible. With `redirect: "manual"`, the workflow can `assert(login.status === 303)` and read the `location` header.
+
+GET-style methods (GET/HEAD/OPTIONS) keep the browser-shaped default of following.
+
+Per-call `init.redirect` overrides the default. Pre-v0.5 workflows that POST and want to follow can pass `redirect: "follow"` explicitly.
 
 ### Behavioral contract
 
@@ -157,7 +188,7 @@ interface RequestInit {
 
 ## 4. NDJSON sample schema (frozen)
 
-When `--out <path>` is set, one line per HTTP request issued by the workflow.
+When `--out <path>` is set, one line per HTTP request issued by the workflow, plus one line per `log.event(...)` call.
 
 ### Success
 
@@ -171,6 +202,14 @@ When `--out <path>` is set, one line per HTTP request issued by the workflow.
 {"ok":false,"t":0.191,"vu":3,"iteration":1,"method":"GET","url":"https://api/me","duration_ms":501.1,"error":"AbortError","message":"request timed out after 500ms","ts":"2026-04-18T..."}
 ```
 
+### Event (v0.5+)
+
+```json
+{"ok":true,"t":0.250,"vu":7,"iteration":0,"event":"checkout.started","data":{"orderId":"abc"},"ts":"2026-05-04T..."}
+```
+
+**Discriminator:** events are recognised by `"event" in sample`. They carry `ok: true` so success-shape consumers don't trip on the field, but `method`/`url`/`status`/`size` are absent. Consumers that compute HTTP stats should skip events with the `"event" in sample` check.
+
 ### Field dictionary
 
 | Field         | Type    | Meaning                                                  |
@@ -178,9 +217,11 @@ When `--out <path>` is set, one line per HTTP request issued by the workflow.
 | `ok`          | boolean | Discriminator — `true` for success, `false` for error    |
 | `t`           | number  | Seconds since run start (monotonic)                      |
 | `vu`          | number  | Virtual user id — `0` in single-run mode                 |
-| `iteration`   | number  | Iteration index within the VU. `-1` from `prologue`, `-2` from `epilogue` (v0.4+). |
-| `phase`       | string? | (v0.4+, optional, additive) `"prologue"` or `"epilogue"` for samples emitted from those hooks. **Omitted on iteration samples** — old consumers that don't read this field treat all samples uniformly, which is correct for iteration-only consumers. |
-| `method`      | string  | HTTP method                                              |
+| `iteration`   | number  | Iteration index within the VU. `-1` from `prologue`, `-2` from `epilogue` (v0.4+). Per-iteration `before`/`after` (v0.5+) carry the REAL iteration index — discriminate via `phase`. |
+| `phase`       | string? | (v0.4+, optional, additive) `"prologue"`, `"epilogue"`, `"before"` (v0.5+), or `"after"` (v0.5+). **Omitted on iteration samples** — old consumers that don't read this field treat all samples uniformly, which is correct for iteration-only consumers. |
+| `event`       | string? | (v0.5+, event samples only) Name passed to `log.event(name, data?)`. Presence of this field is the discriminator for event vs request samples. |
+| `data`        | unknown? | (v0.5+, event samples only) Optional payload from `log.event(name, data)`. Omitted when `data` was not provided. |
+| `method`      | string  | HTTP method (request samples only — absent on events)    |
 | `url`         | string  | Fully resolved URL (query params included)               |
 | `status`      | number  | HTTP status code (success only)                          |
 | `duration_ms` | number  | Wall-clock time from request start to response complete  |
@@ -199,7 +240,7 @@ The internal scope tree, resource discipline, and runtime-context plumbing is im
 
 Features explicitly NOT part of the current release. Listed here so the boundary is visible, not hidden:
 
-**Deferred to v0.5+ (planned):**
+**Deferred to v0.6+ (planned):**
 
 - Cookie domain/public-suffix list (PSL) handling
 - HAR replay matching modes beyond strict (loose, sequential, permissive miss)
@@ -210,9 +251,9 @@ Features explicitly NOT part of the current release. Listed here so the boundary
 
 - `request.use(middleware)` — wrapper modules in userland are the pattern; permanent surface (ordering, async, ctx shape, retry semantics) we'd regret.
 - `expect()` parallel API — `assert` is the frozen surface; `import { expect } from "vitest"` works in `.mjs`/`.ts` for users who want jest-style matchers.
+- **`expected()` (proposed by consumer in v0.3.1 review, withdrawn in v0.5)** — v0.4's automatic AssertionError context made the original case obsolete; a chai-style chain API would compromise the "real JS, no DSL" identity.
 - `toMatchSnapshot()` — no demonstrated user pain. Userland helper is ~7 lines.
-- Default `redirect: "manual"` for POST — too breaking; documented in Troubleshooting instead.
-- `pino`-style structured logger — `process.stderr.write(JSON.stringify(...) + "\n")` is the recommended pattern for trace points in load mode.
+- `pino`-style structured logger — `log.event(name, data?)` (v0.5+) covers structured trace points. Anything more is a userland wrapper.
 - CSRF helpers — too domain-specific; userland 5-liner.
 - JSON-schema response assertion — `import { z } from "zod"` works in `.mjs`/`.ts`.
 
@@ -235,6 +276,8 @@ Features explicitly NOT part of the current release. Listed here so the boundary
 **Shipped in v0.3:** `.env` file loading with `--env-file <path>` (repeatable, with auto-load of `./.env`), `--no-env-file` opt-out, `--require-env <path>` validation against a `.env.example` schema.
 
 **Shipped in v0.4:** breaking change — `--cookies <dir>` is now fresh-each-run (audit trail), `--cookies-resume <dir>` is opt-in cross-run continuity. `prologue` / `epilogue` named-export hooks for once-per-run setup/teardown (epilogue runs even when prologue throws; matches jest beforeAll/afterAll). `AssertionError` auto-includes last-request URL/status/headers/full body. `fetch failed` cause-chain classification — system errno codes and undici-internal names surface in NDJSON `error` field. `Sample.phase?` field for prologue/epilogue traffic. `prologue`/`epilogue`-emitted samples use sentinel `iteration: -1`/`-2`. TypeScript `.ts` workflows on runtimes that strip types natively (Bun, Deno, Node ≥ 23, Node 22.6+ with flag). Better runtime-outside-workflow error message.
+
+**Shipped in v0.5:** breaking change — per-method redirect default. `GET`/`HEAD`/`OPTIONS` continue to follow redirects; `POST`/`PUT`/`PATCH`/`DELETE` now default to `redirect: "manual"` so workflows can `assert(login.status === 303)` against server-rendered apps (htmx, Rails, Phoenix, Django, Axum). Per-iteration `before` / `after` hooks for setup/teardown that's per-iteration rather than per-process; `after` runs even when `before` or `default` threw. Default-export workflow function gains optional third arg `ctx` (whatever `before` returned). `log.event(name, data?)` API for structured trace points emitted into the same NDJSON stream as request samples. `SampleEvent` is the third `Sample` variant with `event`/`data` fields. `Sample.phase` extends to `"before"` / `"after"`.
 
 ### Environment file precedence
 
