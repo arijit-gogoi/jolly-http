@@ -27,6 +27,18 @@ beforeAll(async () => {
         res.end(JSON.stringify({ error: "boom" }))
         return
       }
+      if (req.url === "/r303") {
+        res.statusCode = 303
+        res.setHeader("location", "/landed")
+        res.end("see other")
+        return
+      }
+      if (req.url === "/landed") {
+        res.statusCode = 200
+        res.setHeader("content-type", "application/json")
+        res.end(JSON.stringify({ landed: true, method: req.method }))
+        return
+      }
       res.statusCode = 200
       res.setHeader("content-type", "application/json")
       res.end(
@@ -138,6 +150,58 @@ describe("request", () => {
     await expect(request.GET(`${baseUrl}/x`)).rejects.toThrow(
       /can only be used from inside a workflow function/,
     )
+  })
+
+  describe("per-method redirect default (v0.5+)", () => {
+    it("GET follows redirect (default unchanged)", async () => {
+      const { sink } = collector()
+      const res = await withRuntime(mkCtx(sink), () => request.GET(`${baseUrl}/r303`))
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.landed).toBe(true)
+      expect(body.method).toBe("GET")
+    })
+
+    it("POST does not follow redirect (new default: manual)", async () => {
+      const { sink } = collector()
+      const res = await withRuntime(mkCtx(sink), () => request.POST(`${baseUrl}/r303`, { json: { x: 1 } }))
+      expect(res.status).toBe(303)
+      expect(res.headers.get("location")).toBe("/landed")
+    })
+
+    it("PUT/PATCH/DELETE all default to manual", async () => {
+      const { sink } = collector()
+      for (const method of ["PUT", "PATCH", "DELETE"] as const) {
+        const res = await withRuntime(mkCtx(sink), () =>
+          request[method](`${baseUrl}/r303`),
+        )
+        expect(res.status).toBe(303)
+      }
+    })
+
+    it("HEAD and OPTIONS follow redirects (treated like GET)", async () => {
+      const { sink } = collector()
+      const head = await withRuntime(mkCtx(sink), () => request.HEAD(`${baseUrl}/r303`))
+      expect(head.status).toBe(200)
+      const opts = await withRuntime(mkCtx(sink), () => request.OPTIONS(`${baseUrl}/r303`))
+      expect(opts.status).toBe(200)
+    })
+
+    it("explicit redirect: 'follow' overrides POST default", async () => {
+      const { sink } = collector()
+      const res = await withRuntime(mkCtx(sink), () =>
+        request.POST(`${baseUrl}/r303`, { json: { x: 1 }, redirect: "follow" }),
+      )
+      expect(res.status).toBe(200)
+    })
+
+    it("explicit redirect: 'manual' on GET still works", async () => {
+      const { sink } = collector()
+      const res = await withRuntime(mkCtx(sink), () =>
+        request.GET(`${baseUrl}/r303`, { redirect: "manual" }),
+      )
+      expect(res.status).toBe(303)
+    })
   })
 
   it("connection refused → ECONNREFUSED in sample", async () => {

@@ -6,6 +6,28 @@ import { HarReplayMissError } from "./har.js"
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const
 type MethodName = (typeof METHODS)[number]
 
+/**
+ * Per-method redirect default. v0.5+ tradeoff: server-rendered apps (htmx,
+ * Rails, Phoenix, Django, Axum) almost universally want POST/PUT/PATCH/DELETE
+ * to STOP at a 303/302 so workflow code can assert on the redirect status.
+ * Following them silently swallows the framework's actual response.
+ *
+ * GET/HEAD/OPTIONS continue to follow redirects (matches browsers, httpie, xh).
+ *
+ * Per-call `redirect: "follow"` overrides the default, restoring pre-v0.5
+ * behavior on a per-request basis. v0.4 workflows that rely on POST→follow
+ * must add `redirect: "follow"` to those calls.
+ */
+const REDIRECT_DEFAULT_BY_METHOD: Record<string, "follow" | "manual"> = Object.freeze({
+  GET: "follow",
+  HEAD: "follow",
+  OPTIONS: "follow",
+  POST: "manual",
+  PUT: "manual",
+  PATCH: "manual",
+  DELETE: "manual",
+})
+
 type MethodFn = (url: string, init?: RequestInit) => Promise<Response>
 
 export const request: Record<MethodName, MethodFn> = {
@@ -100,7 +122,7 @@ export async function performRequest(
       headers,
       body,
       signal,
-      redirect: init.redirect ?? "follow",
+      redirect: init.redirect ?? REDIRECT_DEFAULT_BY_METHOD[method] ?? "follow",
     })
   } catch (err) {
     cleanup()
